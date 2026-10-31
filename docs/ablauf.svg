@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="430" viewBox="0 0 900 430" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#8b93a1"/></marker>
+    <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#3ecf8e"/></marker>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#5b9cff"/></marker>
+  </defs>
+  <rect width="900" height="430" rx="18" fill="#0d1117"/>
+
+  <!-- VPS -->
+  <rect x="24" y="24" width="470" height="382" rx="14" fill="none" stroke="#30363d" stroke-dasharray="6 5"/>
+  <text x="44" y="52" fill="#8b93a1" font-size="14" font-weight="600">VPS</text>
+
+  <!-- Bots -->
+  <g font-size="14" fill="#e6edf3">
+    <rect x="44" y="70" width="190" height="210" rx="12" fill="#161b22" stroke="#30363d"/>
+    <text x="62" y="96" fill="#8b93a1" font-size="12" font-weight="600">AKTIVE BOTS (unverändert)</text>
+    <text x="62" y="124">ltbbot</text><text x="150" y="124">stbot</text>
+    <text x="62" y="152">mbot</text><text x="150" y="152">zerobot</text>
+    <text x="62" y="180">fibot</text><text x="150" y="180">dnabot</text>
+    <rect x="62" y="200" width="154" height="62" rx="8" fill="#0d1117" stroke="#30363d"/>
+    <text x="76" y="222" fill="#8b93a1" font-size="12">secret.json</text>
+    <text x="76" y="246" fill="#8b93a1" font-size="12">logs/  ·  Git-Version</text>
+  </g>
+
+  <!-- Cockpit -->
+  <rect x="44" y="306" width="430" height="84" rx="12" fill="#13233a" stroke="#5b9cff"/>
+  <text x="64" y="336" fill="#e6edf3" font-size="16" font-weight="700">Bot-Cockpit  (server.py)</text>
+  <text x="64" y="360" fill="#9fb4d1" font-size="12.5">eigener Prozess · ca. 50–80 MB RAM · nur 127.0.0.1</text>
+  <text x="64" y="378" fill="#9fb4d1" font-size="12.5">Verlauf in data/cockpit.db</text>
+
+  <!-- Cockpit liest Bot-Dateien -->
+  <path d="M139 304 L139 282" stroke="#8b93a1" stroke-width="1.6" marker-end="url(#a)"/>
+  <text x="148" y="298" fill="#8b93a1" font-size="12">liest nur</text>
+
+  <!-- Bitget -->
+  <rect x="610" y="70" width="266" height="110" rx="12" fill="#161b22" stroke="#30363d"/>
+  <text x="630" y="102" fill="#e6edf3" font-size="18" font-weight="700">Bitget</text>
+  <text x="630" y="128" fill="#8b93a1" font-size="12.5">ein Konto (API-Schlüssel) pro Bot</text>
+  <text x="630" y="150" fill="#8b93a1" font-size="12.5">Futures USDT</text>
+
+  <!-- Bots -> Bitget -->
+  <path d="M236 120 L606 104" stroke="#3ecf8e" stroke-width="2.2" marker-end="url(#g)"/>
+  <text x="300" y="98" fill="#3ecf8e" font-size="12.5">Bots handeln: Orders, SL, TP</text>
+
+  <!-- Cockpit -> Bitget -->
+  <path d="M476 330 C560 330 640 260 680 184" stroke="#5b9cff" stroke-width="2.2" fill="none" marker-end="url(#b)"/>
+  <text x="694" y="206" fill="#5b9cff" font-size="12.5">nur lesen · 1× pro Minute</text>
+  <text x="694" y="224" fill="#5b9cff" font-size="12.5">pro Konto, auf Sekunde :30</text>
+
+  <!-- iPhone -->
+  <rect x="756" y="246" width="96" height="160" rx="18" fill="#161b22" stroke="#8b93a1" stroke-width="1.5"/>
+  <rect x="768" y="262" width="72" height="118" rx="6" fill="#0d1117"/>
+  <path d="M776 350 l10 -12 l10 6 l12 -20 l10 8 l12 -14" stroke="#3ecf8e" stroke-width="2" fill="none"/>
+  <text x="804" y="300" fill="#e6edf3" font-size="11" text-anchor="middle">Cockpit</text>
+  <rect x="790" y="390" width="28" height="4" rx="2" fill="#8b93a1"/>
+
+  <!-- Tailscale -->
+  <path d="M476 368 L750 368" stroke="#8b93a1" stroke-width="1.8" stroke-dasharray="7 5" marker-start="url(#a)" marker-end="url(#a)"/>
+  <rect x="540" y="382" width="150" height="26" rx="13" fill="#161b22" stroke="#30363d"/>
+  <text x="615" y="400" fill="#c9d1d9" font-size="12.5" text-anchor="middle">Tailscale · verschlüsselt</text>
+  <text x="613" y="358" fill="#8b93a1" font-size="12" text-anchor="middle">iPhone fragt nur den Server, nie Bitget</text>
+</svg>

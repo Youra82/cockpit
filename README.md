@@ -5,6 +5,10 @@ Eine Web-App, die auf dem iPhone im Vollbild mit eigenem Symbol läuft, wie eine
 
 **Nur lesend.** Das Cockpit sendet keine Orders, storniert nichts und schreibt in keine Bot-Datei.
 
+![Übersicht, Bot-Detail, Auswertung und Alarme auf dem iPhone](docs/screens.png)
+
+<sub>Alle Bilder zeigen Beispielzahlen, keine echten Kontostände.</sub>
+
 ## Was es zeigt
 
 | Seite | Inhalt |
@@ -15,9 +19,22 @@ Eine Web-App, die auf dem iPhone im Vollbild mit eigenem Symbol läuft, wie eine
 | Alarme | Bot läuft nicht, Position ohne Stop-Loss, Liquidation vor Stop-Loss, gleicher Coin in mehreren Bots (Klumpenrisiko), Bitget-Abfrage fehlgeschlagen |
 | Server | Prozessor, RAM, Speicher, Laufzeit, Version und letzter Lauf jedes Bots |
 
+<table>
+<tr>
+<td align="center" width="33%"><img src="docs/bot.png" width="250" alt="Bot-Detail"><br><b>Bot-Detail</b><br><sub>Positionen mit SL, TP und Abstand zur Liquidation</sub></td>
+<td align="center" width="33%"><img src="docs/auswertung.png" width="250" alt="Auswertung"><br><b>Auswertung</b><br><sub>Ziel, Gewinn pro Tag, Kosten, alle Trades</sub></td>
+<td align="center" width="33%"><img src="docs/server.png" width="250" alt="Server"><br><b>Server</b><br><sub>Auslastung und Stand jedes Bots</sub></td>
+</tr>
+</table>
+
 ## Stört es die Bots?
 
 Nein.
+
+![Datenfluss: Bots handeln auf Bitget, das Cockpit liest nur mit, das iPhone fragt nur das Cockpit](docs/ablauf.svg)
+
+![Takt: Bots zur vollen Minute, Cockpit auf Sekunde 30](docs/takt.svg)
+
 - Der Server fragt Bitget **einmal pro Minute pro Konto** ab, versetzt auf Sekunde 30, damit es nicht mit den Bot-Läufen zur vollen Minute zusammenfällt. Das sind etwa 5 Anfragen pro Minute und Konto, weit unter Bitgets Grenze von mehreren Anfragen **pro Sekunde**. Geschlossene Trades werden nur alle 10 Minuten geholt.
 - Das iPhone fragt nur diesen Server ab, nie Bitget direkt. Wie oft die App offen ist, ändert nichts an der Last bei Bitget.
 - Ob ein Bot läuft, erkennt das Cockpit am Zeitpunkt seiner letzten Log-Datei in `logs/`. Diese Dateien werden nur gelesen.
