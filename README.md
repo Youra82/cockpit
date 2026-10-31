@@ -30,9 +30,11 @@ Die API-Schlüssel kommen aus der `secret.json` des jeweiligen Bots. Nutzen zwei
 Das Cockpit gehört in **denselben Ordner wie die Bots**, zum Beispiel `/root/cockpit` neben `/root/ltbbot`.
 Liegt ein Bot woanders, trägst du in `config.json` beim Bot `"path": "/home/.../bot"` ein.
 
+Das Repo ist **privat**. Der VPS braucht deshalb einmal eine Anmeldung, entweder mit `gh auth login` oder mit einem Token als Passwort beim `git clone`. Das Token bekommst du auf GitHub unter Settings → Developer settings → Fine-grained tokens, mit nur Lesezugriff auf `cockpit`.
+
 ```bash
 cd ~
-git clone https://github.com/Youra82/cockpit.git
+git clone https://github.com/Youra82/cockpit.git   # Benutzer: Youra82, Passwort: Token
 cd cockpit
 bash install.sh          # fragt das App-Passwort ab, prüft die Bot-Ordner, legt den Cron-Eintrag an
 tail -f logs/cockpit.log # nach spätestens einer Minute: "Bot-Cockpit läuft auf http://127.0.0.1:8787"
