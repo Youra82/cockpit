@@ -15,7 +15,7 @@ Eine Web-App, die auf dem iPhone im Vollbild mit eigenem Symbol läuft, wie eine
 |---|---|
 | Übersicht | Gesamtkapital, PnL heute, offener Gewinn, Bots aktiv, Positionen, Trades heute, Liste der Bots |
 | Bot-Detail | Kontostand mit Kurve (1T/1W/1M/Alles), offene Positionen mit SL/TP und Abstand zur Liquidation, wartende Orders, letzte Trades, Git-Version |
-| Auswertung | Ziel 100k (Ist und Soll), Kalender mit Gewinn pro Tag, Kosten (Kursgewinn, Gebühren, Funding), Trefferquote, letzte Trades aller Bots |
+| Auswertung | Ziel (in der App änderbar), Rückgang vom Höchststand, Bot-Rennen (alle starten bei 100), Kalender mit Gewinn pro Tag, Wasserfall Kursgewinn → Gebühren → Funding → Netto, jeder Trade als Punkt (Haltedauer × Ergebnis), Heatmap Wochentag × Uhrzeit, offene Positionen je Coin mit Long/Short, letzte Trades. Alle Grafiken antippbar |
 | Alarme | Bot läuft nicht, Position ohne Stop-Loss, Liquidation vor Stop-Loss, gleicher Coin in mehreren Bots (Klumpenrisiko), Bitget-Abfrage fehlgeschlagen |
 | Server | Prozessor, RAM, Speicher, Laufzeit, Version und letzter Lauf jedes Bots |
 

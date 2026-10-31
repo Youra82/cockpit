@@ -3,6 +3,7 @@
   --text: #E9ECF1; --muted: #9AA3AF; --dim: #6B7480;
   --up: #3FBF80; --up-bg: #12291F; --down: #F2767F; --down-bg: #2E1719;
   --warn: #F2A93B; --warn-bg: #2E2412; --accent: #5B9BFF; --accent-bg: #14223A;
+  --b1: #5B9BFF; --b2: #3FBF80; --b3: #F2A93B; --b4: #C38BFF; --b5: #F2767F; --b6: #4FD1C5;
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
   color-scheme: dark;
 }
@@ -135,3 +136,25 @@ h2 small { font-size: 12px; color: var(--muted); font-weight: 400; }
 .stip.on { opacity: 1; transform: none; }
 .stip b { font-family: var(--mono); font-size: 14px; }
 .stip small { color: var(--muted); font-size: 11px; }
+/* Grafiken der Auswertung */
+.q { margin: 0 0 8px; font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+.info { min-height: 44px; padding: 8px 12px; margin-bottom: 8px; border-radius: 12px; background: var(--bg); border: 1px solid var(--line); font-size: 12.5px; color: var(--muted); display: grid; gap: 2px; font-variant-numeric: tabular-nums; }
+.info b { color: var(--text); font-family: var(--mono); font-size: 13.5px; font-weight: 600; }
+.info b.sm { font-size: 12px; }
+.info .up, .info b.up { color: var(--up); } .info .down, .info b.down { color: var(--down); } .info .warn { color: var(--warn); }
+svg.viz { display: block; width: 100%; height: auto; touch-action: pan-y; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+svg.viz text { font-family: var(--mono); font-size: 10px; fill: var(--dim); }
+svg.viz text.strong { fill: var(--text); }
+svg.viz text.big { font-size: 15px; font-weight: 600; }
+svg.viz .grid { stroke: var(--line); stroke-width: 1; }
+svg.viz .grid.dash { stroke-dasharray: 2 3; }
+svg.viz .zero { stroke: var(--muted); stroke-opacity: .5; }
+svg.viz .link { stroke: var(--dim); stroke-dasharray: 2 2; }
+svg.viz .cursor { stroke: var(--muted); stroke-opacity: .6; }
+svg.viz .cursordot { fill: var(--text); stroke: var(--card); stroke-width: 2; }
+svg.viz .hit { cursor: pointer; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.legend button { font-size: 12px; font-family: inherit; color: var(--text); background: var(--soft); border: 1px solid var(--line); border-radius: 999px; padding: 5px 10px; display: flex; gap: 6px; align-items: center; cursor: pointer; }
+.legend button i { width: 9px; height: 9px; border-radius: 50%; display: block; }
+.legend button[aria-pressed="false"] { opacity: .4; }
+.seg.wrap { flex-wrap: wrap; margin-bottom: 8px; }

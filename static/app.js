@@ -299,18 +299,16 @@ function statsBody(s) {
     cells += `<div class="${d === now.getDate() ? 'today' : ''}" style="${style}">${d}${v != null ? `<small>${signed(v, 0)}</small>` : ''}</div>`;
   }
   const tt = s.totals;
-  return `<h2>${now.toLocaleDateString('de-DE', { month: 'long', year: 'numeric' })} <small>Gewinn pro Tag (USDT)</small></h2>
+  const viz = (id, title, sub, q) => `<h2>${title} <small>${sub}</small></h2>
+  <div class="card"><p class="q">${q}</p><div id="${id}"><div class="empty">lädt …</div></div></div>`;
+  return `${viz('vizA', 'Rückgang vom Höchststand', '90 Tage', 'Wie tief liege ich unter meinem besten Stand, und wie lange hat die Erholung gedauert?')}
+  ${viz('vizB', 'Bot-Rennen', 'Start = 100', 'Welcher Bot entwickelt sich am besten, egal wie viel Geld auf seinem Konto liegt?')}
+  <h2>${now.toLocaleDateString('de-DE', { month: 'long', year: 'numeric' })} <small>Gewinn pro Tag (USDT)</small></h2>
   <div class="card"><div class="cal">${cells}</div></div>
-  <h2>Was der Handel kostet <small>dieser Monat</small></h2>
-  <div class="tiles">
-    <div class="tile"><span class="lbl">Kursgewinn</span><b class="${cls(tt.month_gross)}">${signed(tt.month_gross)}</b></div>
-    <div class="tile"><span class="lbl">Gebühren</span><b class="${cls(tt.month_fees)}">${signed(tt.month_fees)}</b></div>
-    <div class="tile"><span class="lbl">Funding</span><b class="${cls(tt.month_funding)}">${signed(tt.month_funding)}</b></div>
-  </div>
-  <div class="tiles" style="grid-template-columns:repeat(2,minmax(0,1fr))">
-    <div class="tile"><span class="lbl">Netto diesen Monat</span><b class="${cls(tt.month_net)}">${signed(tt.month_net)} USDT</b></div>
-    <div class="tile"><span class="lbl">Trefferquote (90 T)</span><b>${tt.winrate != null ? nf(tt.winrate, 0) + ' %' : '—'}</b></div>
-  </div>
+  ${viz('vizC', 'Wohin das Geld geht', 'dieser Monat', 'Was bringen die Trades, und was fressen Gebühren und Funding wieder auf?')}
+  ${viz('vizD', 'Jeder Trade ein Punkt', '90 Tage', 'Verlieren lange Trades öfter? Tragen wenige Ausreißer das Ergebnis? Punkt antippen.')}
+  ${viz('vizE', 'Wann verdienen die Bots?', '90 Tage', 'Summe der Trades je Wochentag und Stunde, in der sie geschlossen wurden. Feld antippen.')}
+  ${viz('vizF', 'Wo mein Geld gerade steckt', 'offene Positionen', 'Positionsgröße je Coin über alle Bots, dazu Long gegen Short. Segment antippen.')}
   <h2>Letzte Trades <small>${tt.count || 0} in 90 Tagen</small></h2>
   <div class="card tight">${tradeRows(s.trades, true)}</div>`;
 }
@@ -377,8 +375,15 @@ async function render() {
       const c = document.getElementById('botchart'); if (c) { c.innerHTML = chartWithSummary(pts); bindScrub(c, pts); }
       const t = document.getElementById('bottrades'); if (t) t.innerHTML = tradeRows(st.trades, false);
     } else if (r.name === 'auswertung') {
-      const st = await api('/api/stats?bot=all');
-      const el = document.getElementById('statsbody'); if (el) el.innerHTML = statsBody(st);
+      const [st, trades, race, dd] = await Promise.all([api('/api/stats?bot=all'), api('/api/trades'),
+        api('/api/race?range=Alles'), api('/api/equity?bot=all&range=Alles&mode=gewinn')]);
+      const el = document.getElementById('statsbody');
+      if (el) {
+        el.innerHTML = statsBody(st);
+        const box = (id) => document.getElementById(id);
+        drawDrawdown(box('vizA'), dd); drawRace(box('vizB'), race); drawCosts(box('vizC'), trades);
+        drawScatter(box('vizD'), trades); drawHeatmap(box('vizE'), trades); drawExposure(box('vizF'), state.bots);
+      }
     }
   } catch (e) { /* Login-Wechsel oder Netzwerk: naechster Refresh versucht es erneut */ }
 }
@@ -436,6 +441,11 @@ function showLogin() {
 
 window.addEventListener('hashchange', () => { window.scrollTo(0, 0); render(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
-// Offenes Ziel-Formular oder Finger auf der Kurve nicht durch den Auto-Refresh wegwischen
-setInterval(() => { if (!document.hidden && !scrubbing && !document.querySelector('#goalform:not([hidden])')) refresh(); }, 30000);
+// Offenes Ziel-Formular, Finger auf der Kurve oder eben angetippte Auswahl nicht durch den Auto-Refresh wegwischen
+let lastTouch = 0;
+document.addEventListener('pointerdown', () => { lastTouch = Date.now(); });
+setInterval(() => {
+  if (document.hidden || scrubbing || Date.now() - lastTouch < 45000 || document.querySelector('#goalform:not([hidden])')) return;
+  refresh();
+}, 30000);
 refresh();

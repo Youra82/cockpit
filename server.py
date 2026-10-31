@@ -616,7 +616,8 @@ class App:
             return sorted({b['fp'] for b in self.bots if b['fp']})
         return [b['fp'] for b in self.bots if b['name'] == bot and b['fp']]
 
-    def equity(self, bot, rng, mode):
+    def span(self, rng):
+        """(Beginn, Bucket-Sekunden) eines Zeitraums."""
         span, bucket = {'1T': (86400, 300), '1W': (7 * 86400, 1800), '1M': (30 * 86400, 3 * 3600)}.get(
             rng, (89 * 86400, 6 * 3600))
         since = int(time.time() - span)
@@ -624,9 +625,42 @@ class App:
             # "Heute" ab 0 Uhr, passend zu "Realisiert heute"
             tz = timezone(timedelta(hours=self.cfg['timezone_offset_hours']))
             since = int(datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+        return since, bucket
+
+    def equity(self, bot, rng, mode):
+        since, bucket = self.span(rng)
         fps = self.fps_for(bot)
         pts = self.store.equity_series(fps, since, bucket, mode == 'gewinn') if fps else []
         return [{'t': t, 'v': round(v, 2)} for t, v in pts]
+
+    def race(self, rng):
+        """Gewinnkurve je Bot auf gemeinsamem Zeitraster (fuer das Bot-Rennen)."""
+        since, bucket = self.span(rng)
+        grid = list(range(since, int(time.time()) + 1, bucket))
+        out = []
+        for b in self.bots:
+            if not b['fp']:
+                continue
+            pts, vals, k, cur = self.store.equity_series([b['fp']], since, bucket, True), [], 0, None
+            for t in grid:
+                while k < len(pts) and pts[k][0] <= t:
+                    cur = pts[k][1]
+                    k += 1
+                vals.append(None if cur is None else round(cur, 2))
+            out.append({'name': b['name'], 'v': vals})
+        return {'t': grid, 'bots': out}
+
+    def trades(self):
+        """Alle geschlossenen Trades der letzten 89 Tage, kompakt (Punktwolke, Heatmap, Kosten)."""
+        fps = self.fps_for('all')
+        if not fps:
+            return []
+        name_of = {}
+        for b in self.bots:
+            name_of.setdefault(b['fp'], b['name'])
+        rows = self.store.closes(fps, int((time.time() - 89 * 86400) * 1000))
+        return [{'bot': name_of.get(r['fp']), 'sym': r['symbol'], 'side': r['side'], 'net': r['net'], 'pnl': r['pnl'],
+                 'fees': r['fees'], 'funding': r['funding'], 'ctime': r['ctime'], 'utime': r['utime']} for r in rows]
 
     def stats(self, bot):
         fps = self.fps_for(bot)
@@ -718,6 +752,10 @@ def make_handler(app):
                 return self.send_json(app.equity(q.get('bot'), q.get('range', '1W'), q.get('mode', 'gewinn')))
             if url.path == '/api/stats':
                 return self.send_json(app.stats(q.get('bot')))
+            if url.path == '/api/race':
+                return self.send_json(app.race(q.get('range', 'Alles')))
+            if url.path == '/api/trades':
+                return self.send_json(app.trades())
             self.send_error(404)
 
         def do_POST(self):
