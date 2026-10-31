@@ -1,0 +1,17 @@
+{
+  "password": "HIER-PASSWORT-SETZEN",
+  "host": "127.0.0.1",
+  "port": 8787,
+  "bots_dir": "..",
+  "bots": [
+    {"name": "ltbbot", "cycle_minutes": 15},
+    {"name": "stbot", "cycle_minutes": 15},
+    {"name": "mbot", "cycle_minutes": 5},
+    {"name": "zerobot", "cycle_minutes": 15},
+    {"name": "fibot", "cycle_minutes": 15},
+    {"name": "dnabot", "cycle_minutes": 15}
+  ],
+  "goal_usdt": 100000,
+  "goal_start_date": "2026-10-02",
+  "goal_date": "2027-10-02"
+}
