@@ -96,7 +96,8 @@ cd ~/cockpit && bash update.sh
 
 - Die Kapitalkurve reicht beim ersten Start **90 Tage zurück**. Sie wird aus Bitgets Kontoauszug gebaut (`/api/v2/mix/account/bill`), etwa 10 Abfragen pro Konto, einmalig. Danach kommen nur die neuen Einträge dazu, und alle 5 Minuten wird ein eigener Kontostand gespeichert.
 - **Gewinn** rechnet Ein- und Auszahlungen heraus (Kontoauszug-Typ `trans…`). **Kontostand** zeigt den echten Verlauf mit Einzahlungs-Sprüngen.
-- Der Kontoauszug kennt nur den realisierten Stand. Ab der Installation enthalten die Punkte auch den offenen Gewinn. Am Übergang kann deshalb ein kleiner Sprung entstehen.
+- Die Kurve zeigt den **realisierten** Kontostand, also ohne offene Positionen. Kontoauszug und eigene Messungen zählen damit dasselbe, es gibt keinen Sprung am Übergang. Den offenen Gewinn zeigt die Übersicht separat: **Realisiert heute + Offen jetzt = Zusammen**.
+- **Heute** beginnt um 0 Uhr, passend zu „Realisiert heute“. Ein Finger auf der Kurve zeigt Wert und Zeitpunkt an dieser Stelle.
 - Liquidationen aus dem Kontoauszug (`burst_…`) der letzten 7 Tage erscheinen als Alarm.
 - Die Trade-Historie wird beim ersten Start mit den letzten 100 geschlossenen Positionen pro Konto gefüllt und wächst danach weiter.
 - Push-Nachrichten und Widgets sind noch nicht eingebaut.

@@ -204,6 +204,7 @@ class Store:
         with self.lock:
             self.db.executescript('''
                 CREATE TABLE IF NOT EXISTS snaps (fp TEXT, ts INTEGER, equity REAL, PRIMARY KEY (fp, ts));
+                CREATE TABLE IF NOT EXISTS rsnaps (fp TEXT, ts INTEGER, realized REAL, PRIMARY KEY (fp, ts));
                 CREATE TABLE IF NOT EXISTS closes (
                     fp TEXT, pid TEXT, symbol TEXT, side TEXT, open_price REAL, close_price REAL,
                     size REAL, pnl REAL, net REAL, fees REAL, funding REAL, ctime INTEGER, utime INTEGER,
@@ -214,10 +215,10 @@ class Store:
             ''')
             self.db.commit()
 
-    def add_snap(self, fp, equity, bucket=300):
+    def add_snap(self, fp, realized, bucket=300):
         ts = int(time.time()) // bucket * bucket
         with self.lock:
-            self.db.execute('INSERT OR REPLACE INTO snaps VALUES (?,?,?)', (fp, ts, equity))
+            self.db.execute('INSERT OR REPLACE INTO rsnaps VALUES (?,?,?)', (fp, ts, realized))
             self.db.commit()
 
     def add_bills(self, fp, rows):
@@ -236,12 +237,13 @@ class Store:
                                    (fp, since_ms, types_prefix + '%')).fetchall()
 
     def account_points(self, fp):
-        """Kontoverlauf eines Kontos: Bitget-Kontoauszug bis zum ersten eigenen Snapshot, danach Snapshots.
+        """Realisierter Kontoverlauf (ohne offene Positionen): Bitget-Kontoauszug bis zum ersten eigenen
+        Snapshot, danach Snapshots. Beide messen dasselbe -> kein Sprung am Uebergang.
         Liefert Punkte (ts_s, wert) und Ein-/Auszahlungen (ts_s, betrag)."""
         with self.lock:
             bills = self.db.execute('SELECT ts, balance, amount, fee, btype FROM bills WHERE fp=? ORDER BY ts, bid',
                                     (fp,)).fetchall()
-            snaps = self.db.execute('SELECT ts, equity FROM snaps WHERE fp=? ORDER BY ts', (fp,)).fetchall()
+            snaps = self.db.execute('SELECT ts, realized FROM rsnaps WHERE fp=? ORDER BY ts', (fp,)).fetchall()
         first_snap = snaps[0][0] if snaps else None
         pts = []
         if bills and bills[0][1] is not None:
@@ -269,6 +271,7 @@ class Store:
         times = sorted({t for s in per_account for t, _ in s if t >= since})
         if not times:
             return []
+        times = sorted({since, *times})  # Kurve beginnt genau am Anfang des Zeitraums
         cur, idx, out = [0.0] * len(per_account), [0] * len(per_account), []
         for i, s in enumerate(per_account):
             while idx[i] < len(s) and s[idx[i]][0] < times[0]:
@@ -463,7 +466,8 @@ class Poller(threading.Thread):
         a['data'] = {'equity': equity, 'available': available, 'upnl': upnl,
                      'positions': positions, 'orders': orders}
         a['ts'], a['error'] = time.time(), None
-        self.store.add_snap(fp, equity)
+        if equity is not None:
+            self.store.add_snap(fp, equity - (upnl or 0))
 
         if time.time() - a['last_history'] >= self.cfg['history_minutes'] * 60:
             since = int((time.time() - 89 * 86400) * 1000)
@@ -616,6 +620,10 @@ class App:
         span, bucket = {'1T': (86400, 300), '1W': (7 * 86400, 1800), '1M': (30 * 86400, 3 * 3600)}.get(
             rng, (89 * 86400, 6 * 3600))
         since = int(time.time() - span)
+        if rng == '1T':
+            # "Heute" ab 0 Uhr, passend zu "Realisiert heute"
+            tz = timezone(timedelta(hours=self.cfg['timezone_offset_hours']))
+            since = int(datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
         fps = self.fps_for(bot)
         pts = self.store.equity_series(fps, since, bucket, mode == 'gewinn') if fps else []
         return [{'t': t, 'v': round(v, 2)} for t, v in pts]

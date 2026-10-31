@@ -52,13 +52,23 @@ function totals(bots) {
   return t;
 }
 
+// Realisiert + offen = zusammen, in drei beschrifteten Spalten
+function pnlSplit(real, open) {
+  const sum = (real || 0) + (open || 0);
+  const col = (label, v, hint) => `<div><span class="lbl">${label}</span><b class="${cls(v)}">${signed(v)}</b><small>${hint}</small></div>`;
+  return `<div class="split">
+    ${col('Realisiert heute', real, 'seit 0 Uhr')}
+    <i>+</i>${col('Offen jetzt', open, 'laufende Trades')}
+    <i>=</i>${col('Zusammen', sum, 'falls jetzt zu')}</div>`;
+}
+
 // Zeitraum- und Modus-Umschalter ueber jedem Diagramm
 function chartControls() {
   const seg = (key, opts) => `<div class="seg" role="group">${opts.map(([v, l]) =>
     `<button data-${key}="${v}" class="${ui[key] === v ? 'on' : ''}">${l}</button>`).join('')}</div>`;
   return `<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
     ${seg('mode', [['gewinn', 'Gewinn'], ['konto', 'Kontostand']])}
-    ${seg('range', [['1T', '1T'], ['1W', '1W'], ['1M', '1M'], ['Alles', '90T']])}</div>`;
+    ${seg('range', [['1T', 'Heute'], ['1W', '1W'], ['1M', '1M'], ['Alles', '90T']])}</div>`;
 }
 
 function chartWithSummary(points) {
@@ -66,28 +76,81 @@ function chartWithSummary(points) {
   const first = points[0], last = points[points.length - 1];
   const diff = last.v - first.v, pct = first.v ? diff / first.v * 100 : null;
   const d = (t) => new Date(t * 1000).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
-  return `${chartSvg(points)}
+  const { H, y, ticks, dec } = chartScale(points);
+  const labels = ticks.map((v) => nf(v, dec));
+  const axis = labels.map((l, k) => `<span style="top:${(y(ticks[k]) / H * 100).toFixed(2)}%">${l}</span>`).join('');
+  // Breite nach laengster Zahl, damit die Kurve daneben bleibt
+  return `<div class="chartwrap"><div class="yaxis" style="width:${Math.max(...labels.map((l) => l.length))}ch" aria-hidden="true">${axis}</div>
+    <div class="scrub">${chartSvg(points)}
+      <i class="sline" hidden></i><i class="sdot" hidden></i><div class="stip" hidden></div></div></div>
     <div style="display:flex;justify-content:space-between;font-size:12px" class="muted">
-      <span>${d(first.t)}</span>
+      <span>${ui.range === '1T' ? '0 Uhr' : d(first.t)}</span>
       <b class="${cls(diff)}">${signed(diff)} USDT${pct != null ? ` · ${signed(pct, 1)} %` : ''}</b>
       <span>heute</span></div>
-    ${ui.mode === 'gewinn' ? '<span class="lbl">Ein- und Auszahlungen herausgerechnet.</span>' : ''}`;
+    <span class="lbl">Kurve = realisierter Kontostand, ohne offene Positionen${ui.mode === 'gewinn' ? ', Ein- und Auszahlungen herausgerechnet' : ''}.</span>`;
 }
 
-function chartSvg(points, small) {
-  if (!points || points.length < 2) return `<div class="empty">Noch zu wenig Daten für eine Kurve.</div>`;
+// Gemeinsame Skala fuer Kurve und Finger-Markierung
+function chartScale(points, small) {
   const vs = points.map((p) => p.v);
   let lo = Math.min(...vs), hi = Math.max(...vs);
   // Mindesthoehe 2 % des Kapitals: Cent-Schwankungen sollen nicht wie ein Absturz aussehen
   const minSpan = Math.max(1e-9, Math.abs(vs[vs.length - 1]) * 0.02);
   if (hi - lo < minSpan) { const mid = (hi + lo) / 2; lo = mid - minSpan / 2; hi = mid + minSpan / 2; }
   const W = 320, H = small ? 56 : 110, pad = 4;
-  const xy = points.map((p, i) => [i / (points.length - 1) * W, pad + (1 - (p.v - lo) / (hi - lo)) * (H - 2 * pad)]);
-  const line = xy.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)} ${y.toFixed(1)}`).join(' ');
+  // 3-4 runde Skalenwerte (Schritt 1, 2, 2,5 oder 5 x 10^n)
+  const mag = 10 ** Math.floor(Math.log10((hi - lo) / 3));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((st) => (hi - lo) / st <= 3.5);
+  const ticks = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) ticks.push(Math.round(v / step) * step);
+  const dec = step >= 1 ? 0 : step >= 0.1 ? 1 : 2;
+  return { W, H, ticks, dec, x: (i) => i / (points.length - 1) * W, y: (v) => pad + (1 - (v - lo) / (hi - lo)) * (H - 2 * pad) };
+}
+
+function chartSvg(points, small) {
+  if (!points || points.length < 2) return `<div class="empty">Noch zu wenig Daten für eine Kurve.</div>`;
+  const vs = points.map((p) => p.v);
+  const { W, H, x, y, ticks } = chartScale(points, small);
+  const line = points.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(p.v).toFixed(1)}`).join(' ');
   const col = vs[vs.length - 1] >= vs[0] ? 'var(--up)' : 'var(--down)';
   return `<svg class="chart${small ? ' small' : ''}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Kapitalverlauf">
+    ${small ? '' : ticks.map((v) => `<line x1="0" x2="${W}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" stroke="var(--line)" stroke-width="1" vector-effect="non-scaling-stroke"/>`).join('')}
     <path d="${line} L${W} ${H} L0 ${H} Z" fill="${col}" fill-opacity="0.12"/>
     <path d="${line}" fill="none" stroke="${col}" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>`;
+}
+
+// Finger (oder Maus) auf der Kurve: Punkt, senkrechte Linie und Wert an dieser Stelle
+let scrubbing = false;
+function bindScrub(host, points) {
+  const box = host?.querySelector('.scrub');
+  if (!box || !points || points.length < 2) return;
+  const [line, dot, tip] = ['.sline', '.sdot', '.stip'].map((q) => box.querySelector(q));
+  const { H, y } = chartScale(points);
+  const svg = box.querySelector('svg');
+  const first = points[0].v;
+  const show = (ev) => {
+    const r = box.getBoundingClientRect();
+    const f = Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width));
+    const i = Math.round(f * (points.length - 1));
+    const p = points[i];
+    const px = i / (points.length - 1) * r.width;
+    const sr = svg.getBoundingClientRect();
+    const py = sr.top - r.top + y(p.v) / H * sr.height;
+    line.style.left = dot.style.left = `${px}px`;
+    dot.style.top = `${py}px`;
+    const diff = p.v - first;
+    tip.innerHTML = `<b>${nf(p.v)} USDT</b><span class="${cls(diff)}">${signed(diff)}${first ? ` · ${signed(diff / first * 100, 1)} %` : ''}</span><small>${timeStr(p.t * 1000)}</small>`;
+    line.hidden = dot.hidden = tip.hidden = false;
+    // Wertfeld neben die Linie, auf die Seite mit mehr Platz und weg vom Punkt
+    const gap = 10, tw = tip.offsetWidth, th = tip.offsetHeight;
+    tip.style.left = `${px > r.width / 2 ? Math.max(0, px - gap - tw) : Math.min(r.width - tw, px + gap)}px`;
+    tip.style.top = `${py < r.height / 2 ? r.height - th : 0}px`;
+  };
+  const hide = () => { scrubbing = false; line.hidden = dot.hidden = tip.hidden = true; };
+  box.addEventListener('pointerdown', (ev) => { scrubbing = true; box.setPointerCapture?.(ev.pointerId); show(ev); });
+  box.addEventListener('pointermove', (ev) => { if (scrubbing || ev.pointerType === 'mouse') show(ev); });
+  ['pointerup', 'pointercancel'].forEach((e) => box.addEventListener(e, hide));
+  box.addEventListener('pointerleave', (ev) => { if (ev.pointerType === 'mouse') hide(); });
 }
 
 // ------------------------------------------------------------------ Ansichten
@@ -101,17 +164,12 @@ function header(title, sub, back) {
 
 function viewHome() {
   const t = totals(state.bots);
-  const base = t.equity - t.pnl;
-  const pct = base > 0 ? t.pnl / base * 100 : null;
   const bots = [...state.bots].sort((a, b) => (b.running - a.running) || ((b.pnl_today || 0) - (a.pnl_today || 0)));
   return `${header('Bot-Cockpit', `Bitget · aktualisiert ${ago(state.updated)}`)}
   <div class="card">
-    <span class="lbl">Gesamtkapital (alle Konten)</span>
+    <span class="lbl">Gesamtkapital (alle Konten, inkl. offener Positionen)</span>
     <span class="big">${nf(t.equity)} <small>USDT</small></span>
-    <div class="chips">
-      <span class="chip ${cls(t.pnl)}">heute ${signed(t.pnl)} USDT${pct != null ? ` · ${signed(pct, 1)} %` : ''}</span>
-      <span class="chip">offen ${signed(t.upnl)} USDT</span>
-    </div>
+    ${pnlSplit(t.pnl, t.upnl)}
     ${chartControls()}
     <div id="homechart"><div class="empty">lädt …</div></div>
   </div>
@@ -120,7 +178,7 @@ function viewHome() {
     <div class="tile"><span class="lbl">Positionen</span><b>${t.positions}</b></div>
     <div class="tile"><span class="lbl">Trades heute</span><b>${t.trades}</b></div>
   </div>
-  <h2>Meine Bots <small>sortiert nach PnL heute</small></h2>
+  <h2>Meine Bots <small>Zahl = realisiert heute</small></h2>
   ${bots.map((b) => {
     const status = !b.has_key ? 'kein API-Schlüssel gefunden' : b.running ? `läuft · ${ago(b.last_activity)}` : `steht · letzter Lauf ${ago(b.last_activity)}`;
     return `<a class="bot" href="#/bot/${encodeURIComponent(b.name)}">
@@ -142,14 +200,11 @@ function viewBot(name) {
   ${b.error ? `<div class="note">Bitget-Abfrage fehlgeschlagen: ${esc(b.error)}</div>` : ''}
   ${b.shared_with.length ? `<div class="note">Gemeinsames Konto mit ${esc(b.shared_with.join(', '))} – Zahlen gelten für beide.</div>` : ''}
   <div class="card">
-    <div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Kontostand</span><span class="mid">${nf(b.equity)} USDT</span></div>
+    <div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Kontostand (inkl. offener Positionen)</span><span class="mid">${nf(b.equity)} USDT</span></div>
+    ${pnlSplit(b.pnl_today, b.upnl)}
     ${chartControls()}
     <div id="botchart"><div class="empty">lädt …</div></div>
-    <div class="tiles" style="gap:6px">
-      <div><span class="lbl">PnL heute</span><div class="${cls(b.pnl_today)}" style="font-weight:600">${signed(b.pnl_today)}</div></div>
-      <div><span class="lbl">Offen</span><div class="${cls(b.upnl)}" style="font-weight:600">${signed(b.upnl)}</div></div>
-      <div><span class="lbl">Verfügbar</span><div style="font-weight:600">${nf(b.available)}</div></div>
-    </div>
+    <span class="lbl">Frei verfügbar: ${nf(b.available)} USDT</span>
   </div>
   <h2>Offene Positionen <small>${b.positions.length}</small></h2>
   ${b.positions.length ? b.positions.map(posCard).join('') : '<div class="card"><div class="empty">Keine offene Position</div></div>'}
@@ -315,10 +370,10 @@ async function render() {
   try {
     if (r.name === 'home') {
       const pts = await eq('all');
-      const el = document.getElementById('homechart'); if (el) el.innerHTML = chartWithSummary(pts);
+      const el = document.getElementById('homechart'); if (el) { el.innerHTML = chartWithSummary(pts); bindScrub(el, pts); }
     } else if (r.name === 'bot') {
       const [pts, st] = await Promise.all([eq(r.arg), api(`/api/stats?bot=${encodeURIComponent(r.arg)}`)]);
-      const c = document.getElementById('botchart'); if (c) c.innerHTML = chartWithSummary(pts);
+      const c = document.getElementById('botchart'); if (c) { c.innerHTML = chartWithSummary(pts); bindScrub(c, pts); }
       const t = document.getElementById('bottrades'); if (t) t.innerHTML = tradeRows(st.trades, false);
     } else if (r.name === 'auswertung') {
       const st = await api('/api/stats?bot=all');
@@ -380,6 +435,6 @@ function showLogin() {
 
 window.addEventListener('hashchange', () => { window.scrollTo(0, 0); render(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
-// Offenes Ziel-Formular nicht durch den Auto-Refresh wegwischen
-setInterval(() => { if (!document.hidden && !document.querySelector('#goalform:not([hidden])')) refresh(); }, 30000);
+// Offenes Ziel-Formular oder Finger auf der Kurve nicht durch den Auto-Refresh wegwischen
+setInterval(() => { if (!document.hidden && !scrubbing && !document.querySelector('#goalform:not([hidden])')) refresh(); }, 30000);
 refresh();
