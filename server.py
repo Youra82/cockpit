@@ -31,6 +31,7 @@ STATIC = os.path.join(BASE, 'static')
 DATA = os.path.join(BASE, 'data')
 CONFIG_PATH = os.path.join(BASE, 'config.json')
 DB_PATH = os.path.join(DATA, 'cockpit.db')
+GOAL_PATH = os.path.join(DATA, 'goal.json')
 PRODUCT = 'USDT-FUTURES'
 
 DEFAULTS = {
@@ -65,6 +66,27 @@ def load_config():
     if not str(cfg['password']).strip() or cfg['password'] == 'HIER-PASSWORT-SETZEN':
         sys.exit('FEHLER: In config.json ist kein Passwort gesetzt.')
     return cfg
+
+
+def load_goal(cfg):
+    """Ziel aus config.json, in der App geaendert -> data/goal.json hat Vorrang."""
+    goal = {'usdt': cfg['goal_usdt'], 'start': cfg['goal_start_date'], 'end': cfg['goal_date']}
+    try:
+        with open(GOAL_PATH, encoding='utf-8') as f:
+            goal.update(json.load(f))
+    except (OSError, ValueError):
+        pass
+    return goal
+
+
+def parse_goal(body):
+    """Prueft ein Ziel aus der App; ValueError bei ungueltiger Eingabe."""
+    usdt = float(body['usdt'])
+    start, end = str(body['start']), str(body['end'])
+    d0, d1 = datetime.strptime(start, '%Y-%m-%d'), datetime.strptime(end, '%Y-%m-%d')
+    if not 0 < usdt < 1e12 or d1 <= d0:
+        raise ValueError
+    return {'usdt': usdt, 'start': start, 'end': end}
 
 
 def is_transfer(btype):
@@ -553,7 +575,7 @@ class Poller(threading.Thread):
         with self.lock:
             self.state = {'updated': now, 'bots': bots, 'alerts': alerts, 'clusters': clusters,
                           'server': server_info(),
-                          'goal': {'usdt': cfg['goal_usdt'], 'start': cfg['goal_start_date'], 'end': cfg['goal_date']},
+                          'goal': load_goal(cfg),
                           'poll_seconds': cfg['poll_seconds']}
 
     def snapshot(self):
@@ -691,7 +713,10 @@ def make_handler(app):
             self.send_error(404)
 
         def do_POST(self):
-            if urlparse(self.path).path != '/api/login':
+            path = urlparse(self.path).path
+            if path == '/api/goal':
+                return self.post_goal()
+            if path != '/api/login':
                 return self.send_error(404)
             try:
                 n = min(int(self.headers.get('Content-Length') or 0), 4096)
@@ -704,6 +729,24 @@ def make_handler(app):
             secure = '; Secure' if self.headers.get('X-Forwarded-Proto') == 'https' else ''
             cookie = f'cockpit={app.token}; Max-Age=31536000; Path=/; HttpOnly; SameSite=Strict{secure}'
             self.send_json({'ok': True}, headers={'Set-Cookie': cookie})
+
+        def post_goal(self):
+            if not self.authed():
+                return self.send_json({'error': 'login'}, 401)
+            try:
+                n = min(int(self.headers.get('Content-Length') or 0), 4096)
+                goal = parse_goal(json.loads(self.rfile.read(n) or b'{}'))
+            except (ValueError, KeyError, TypeError, AttributeError):
+                return self.send_json({'error': 'ungültig'}, 400)
+            tmp = GOAL_PATH + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(goal, f)
+            os.replace(tmp, GOAL_PATH)
+            with app.poller.lock:
+                if app.poller.state:
+                    app.poller.state['goal'] = goal
+            log.info('Ziel geändert: %s', goal)
+            self.send_json(goal)
 
     return Handler
 

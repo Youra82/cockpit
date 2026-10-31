@@ -208,7 +208,14 @@ function viewStats() {
   const ist = Math.min(100, t.equity / g.usdt * 100);
   return `${header('Auswertung', 'alle aktiven Bots')}
   <div class="card">
-    <h2 style="margin:0">Ziel ${nf(g.usdt, 0)} USDT <small>bis ${new Date(g.end).toLocaleDateString('de-DE')}</small></h2>
+    <h2 style="margin:0">Ziel ${nf(g.usdt, 0)} USDT <small>bis ${new Date(g.end).toLocaleDateString('de-DE')} · <button class="linkbtn" id="goaledit" type="button">Ändern</button></small></h2>
+    <form class="goalform" id="goalform" hidden>
+      <label>Ziel (USDT)<input type="number" id="g_usdt" inputmode="decimal" min="1" step="any" value="${g.usdt}" required></label>
+      <label>Start<input type="date" id="g_start" value="${esc(g.start)}" required></label>
+      <label>Bis<input type="date" id="g_end" value="${esc(g.end)}" required></label>
+      <div class="row"><button class="btn" type="submit">Speichern</button><button class="btn ghost" type="button" id="goalcancel">Abbrechen</button></div>
+      <div class="err" id="goalerr" role="alert"></div>
+    </form>
     <div class="goalbar"><i style="width:${ist}%"></i><em style="left:${soll}%"></em></div>
     <div style="display:flex;justify-content:space-between;font-size:12px"><b style="color:var(--accent)">${nf(ist, 1)} % erreicht</b><span class="warn">Zeit vergangen: ${nf(soll, 0)} %</span></div>
     <span class="lbl">Kapital jetzt ${nf(t.equity)} USDT. Einzahlungen sind hier noch enthalten.</span>
@@ -302,6 +309,7 @@ async function render() {
   document.getElementById('reload')?.addEventListener('click', refresh);
 
   app.querySelectorAll('[data-range]').forEach((b) => b.addEventListener('click', () => { ui.range = b.dataset.range; render(); }));
+  bindGoalForm();
   app.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => { ui.mode = b.dataset.mode; render(); }));
   const eq = (bot) => api(`/api/equity?bot=${encodeURIComponent(bot)}&range=${ui.range}&mode=${ui.mode}`);
   try {
@@ -317,6 +325,24 @@ async function render() {
       const el = document.getElementById('statsbody'); if (el) el.innerHTML = statsBody(st);
     }
   } catch (e) { /* Login-Wechsel oder Netzwerk: naechster Refresh versucht es erneut */ }
+}
+
+function bindGoalForm() {
+  const form = document.getElementById('goalform');
+  if (!form) return;
+  const toggle = (open) => { form.hidden = !open; };
+  document.getElementById('goaledit').addEventListener('click', () => toggle(form.hidden));
+  document.getElementById('goalcancel').addEventListener('click', () => toggle(false));
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const body = { usdt: Number(document.getElementById('g_usdt').value), start: document.getElementById('g_start').value,
+      end: document.getElementById('g_end').value };
+    const r = await fetch('/api/goal', { method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) { document.getElementById('goalerr').textContent = 'Ungültig: Betrag > 0 und „Bis“ nach „Start“.'; return; }
+    state.goal = await r.json();
+    render();
+  });
 }
 
 async function refresh() {
@@ -354,5 +380,6 @@ function showLogin() {
 
 window.addEventListener('hashchange', () => { window.scrollTo(0, 0); render(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
-setInterval(() => { if (!document.hidden) refresh(); }, 30000);
+// Offenes Ziel-Formular nicht durch den Auto-Refresh wegwischen
+setInterval(() => { if (!document.hidden && !document.querySelector('#goalform:not([hidden])')) refresh(); }, 30000);
 refresh();

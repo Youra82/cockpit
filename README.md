@@ -89,7 +89,7 @@ cd ~/cockpit && bash update.sh
 | `password` | App-Passwort (Pflicht) |
 | `bots` | aktive Bots mit `cycle_minutes`. Wird ein Bot länger als 3 Zyklen (mindestens 20 min) nicht ausgeführt, gilt er als „läuft nicht“ |
 | `bots_dir` | Ordner, in dem die Bots liegen (Standard: eine Ebene über dem Cockpit) |
-| `goal_usdt`, `goal_start_date`, `goal_date` | Ziel-Balken auf der Seite Auswertung |
+| `goal_usdt`, `goal_start_date`, `goal_date` | Startwerte für den Ziel-Balken auf der Seite Auswertung. In der App über **Ändern** anpassbar, das wird in `data/goal.json` gespeichert und hat Vorrang |
 | `poll_seconds`, `poll_offset_seconds` | Abfragetakt (Standard: 60 s, auf Sekunde 30) |
 
 ## Grenzen der ersten Version
