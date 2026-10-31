@@ -214,8 +214,10 @@ function viewBot(name) {
       <span class="muted">${o.kind === 'trigger' ? 'Trigger' : 'Limit'} ${esc(o.side || '')}</span>
       <span class="mono">${price(o.trigger || o.price)}</span></div>`).join('')}
       ${otherOrders.length > 8 ? `<div class="li muted">… und ${otherOrders.length - 8} weitere</div>` : ''}</div>` : ''}
-  <h2>Letzte Trades</h2>
+  <h2>Letzte Trades <small>antippen für Chart</small></h2>
   <div class="card tight" id="bottrades"><div class="empty">lädt …</div></div>
+  <h2>Welche Coins bringen Geld? <small>90 Tage</small></h2>
+  <div class="card" id="botcoins"><div class="empty">lädt …</div></div>
   ${b.git ? `<div class="lbl" style="text-align:center">Version ${esc(b.git.hash)} · ${esc(b.git.subject)}</div>` : ''}`;
 }
 
@@ -233,18 +235,39 @@ function posCard(p) {
       <span>SL<b class="${p.sl ? 'down' : 'warn'}">${p.sl ? price(p.sl) : 'FEHLT'}</b></span>
       <span>TP<b class="${p.tp ? 'up' : 'muted'}">${p.tp ? price(p.tp) : '—'}</b></span>
     </div>
-    ${p.liq_pct != null ? `<div class="row" style="font-size:11px"><span class="muted">Liquidation ${price(p.liq)}${slFirst ? ' · SL greift vorher' : ''}</span>
-      <div class="bar"><i style="width:${Math.min(100, p.liq_pct * 2)}%;background:${liqCol}"></i></div>
-      <span class="mono" style="color:${liqCol}">${nf(p.liq_pct, 1)} %</span></div>` : ''}
+    ${ladder(p, slFirst, liqCol)}
   </div>`;
+}
+
+// Preisleiter: SL, Einstieg, Kurs, TP (und Liquidation, falls sie vor dem SL liegt) auf einer Achse
+function ladder(p, slFirst, liqCol) {
+  if (!p.mark || !p.entry) return '';
+  const showLiq = p.liq && !slFirst;
+  const marks = [['S', p.sl, 'var(--down)', 0], ['T', p.tp, 'var(--up)', 0], ['E', p.entry, 'var(--muted)', 1], ['L', showLiq ? p.liq : null, 'var(--down)', 1]]
+    .filter((m) => m[1]);
+  const vals = [...marks.map((m) => m[1]), p.mark], lo = Math.min(...vals), hi = Math.max(...vals);
+  const X0 = 12, X1 = 308, x = (v) => (hi > lo ? X0 + (v - lo) / (hi - lo) * (X1 - X0) : (X0 + X1) / 2);
+  const zone = (a, b, col) => (a && b ? `<rect x="${Math.min(x(a), x(b)).toFixed(1)}" y="25" width="${Math.abs(x(a) - x(b)).toFixed(1)}" height="8" fill="${col}" fill-opacity=".22"/>` : '');
+  const ticks = marks.map(([l, v, col, below]) => `<line x1="${x(v).toFixed(1)}" x2="${x(v).toFixed(1)}" y1="19" y2="39" stroke="${col}" stroke-width="2"${l === 'L' ? ' stroke-dasharray="3 2"' : ''}/>
+    <text x="${x(v).toFixed(1)}" y="${below ? 52 : 13}" text-anchor="middle" fill="${col}">${l}</text>`).join('');
+  const pct = (v) => (v / p.mark - 1) * 100 * (p.side === 'short' ? -1 : 1);
+  const toSl = p.sl ? Math.abs(p.mark / p.sl - 1) * 100 : null, toTp = p.tp ? Math.abs(p.tp / p.mark - 1) * 100 : null;
+  return `<svg class="ladder" viewBox="0 0 320 58" role="img" aria-label="Preisleiter">
+      <line x1="${X0}" x2="${X1}" y1="29" y2="29" stroke="var(--line)" stroke-width="2"/>
+      ${zone(p.sl, p.entry, 'var(--down)')}${zone(p.entry, p.tp, 'var(--up)')}${ticks}
+      <circle cx="${x(p.mark).toFixed(1)}" cy="29" r="6" fill="var(--text)" stroke="var(--card)" stroke-width="2.5"/></svg>
+    <div class="ladtxt"><span><i style="background:var(--down)"></i>S = Stop-Loss${toSl != null ? ` <b class="mono">${nf(toSl, 1)} %</b> entfernt` : ' <b class="warn">fehlt</b>'}</span>
+      <span><i style="background:var(--up)"></i>T = Take-Profit${toTp != null ? ` <b class="mono">${nf(toTp, 1)} %</b> entfernt` : ' —'}</span>
+      <span><i style="background:var(--muted)"></i>E = Einstieg · ● = Kurs <b class="mono ${cls(pct(p.entry) * -1)}">${signed(-pct(p.entry), 1)} %</b></span>
+      ${p.liq ? `<span><i style="background:${liqCol}"></i>${showLiq ? 'L = ' : ''}Liquidation ${price(p.liq)} · <b class="mono" style="color:${liqCol}">${nf(p.liq_pct, 1)} %</b>${slFirst ? ' · SL greift vorher' : ''}</span>` : ''}</div>`;
 }
 
 function tradeRows(trades, withBot) {
   if (!trades.length) return '<div class="empty">Noch keine geschlossenen Trades</div>';
-  return trades.slice(0, 25).map((t) => `<div class="li">
+  return trades.slice(0, 25).map((t) => `<a class="li" href="#/trade/${encodeURIComponent(t.pid)}">
     <span class="muted" style="width:86px">${timeStr(t.utime)}</span>
     <span class="grow">${esc(coin(t.symbol))} <span class="muted">${esc(t.side || '')}${withBot ? ' · ' + esc(t.bot || '') : ''}</span></span>
-    <b class="mono ${cls(t.net)}">${signed(t.net)}</b></div>`).join('');
+    <b class="mono ${cls(t.net)}">${signed(t.net)}</b>${icon.chev}</a>`).join('');
 }
 
 function viewAlerts() {
@@ -253,7 +276,67 @@ function viewAlerts() {
   ${a.length ? a.map((x) => `<div class="alert ${x.level}"><span class="ic" aria-hidden="true">!</span>
     <div class="t"><b>${esc(x.title)}${x.bot ? ` <span class="muted" style="font-weight:400">· ${esc(x.bot)}</span>` : ''}</b>
     <span>${esc(x.text)}</span></div></div>`).join('') : '<div class="ok">Alles in Ordnung – kein Alarm.</div>'}
-  <div class="lbl" style="text-align:center">Geprüft: Bot läuft, Stop-Loss vorhanden, Abstand zur Liquidation, gleiche Coins in mehreren Bots, Bitget erreichbar.</div>`;
+  <div class="lbl" style="text-align:center">Geprüft: Bot läuft, Stop-Loss vorhanden, Abstand zur Liquidation, gleiche Coins in mehreren Bots, Bitget erreichbar.</div>
+  <h2>Mitteilungen <small>aufs iPhone</small></h2>
+  <div class="card" id="pushbox"><div class="empty">lädt …</div></div>
+  <h2>Was ist passiert? <small>letzte 7 Tage</small></h2>
+  <div class="card" id="timeline"><div class="empty">lädt …</div></div>`;
+}
+
+function viewTrade(pid) {
+  return `<div class="head"><a class="round" href="#/" id="tradeback" aria-label="Zurück">${icon.back}</a>
+    <div class="t"><small>geschlossener Trade</small><h1 class="sm">Trade im Chart</h1></div><span></span></div>
+  <div class="card"><div id="tradechart"><div class="empty">lädt Kerzen …</div></div></div>
+  <div class="lbl" style="text-align:center">Kerzen von Bitgets öffentlichen Marktdaten, eine Abfrage beim Öffnen, ohne API-Schlüssel. Blau hinterlegt: Zeit im Trade.</div>`;
+}
+
+// ------------------------------------------------------------------ Mitteilungen (Web-Push, iOS ab 16.4 nur als App vom Home-Bildschirm)
+const b64ToBytes = (b) => Uint8Array.from(atob((b + '='.repeat((4 - b.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+async function pushPanel(box) {
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+    box.innerHTML = `<div class="q">${standalone ? 'Dieses Gerät unterstützt keine Web-Mitteilungen (iOS 16.4 oder neuer nötig).'
+      : 'Mitteilungen gehen auf dem iPhone nur, wenn das Cockpit vom <b>Home-Bildschirm</b> gestartet wird: Safari → Teilen → Zum Home-Bildschirm, dann von dort öffnen.'}</div>`;
+    return;
+  }
+  const info = await api('/api/push/key');
+  if (!info.key) { box.innerHTML = '<div class="q">Auf dem Server fehlt die Push-Bibliothek. Auf dem MINIPC <span class="mono">bash update.sh</span> ausführen.</div>'; return; }
+  const reg = await navigator.serviceWorker.register('/sw.js');
+  let sub = await reg.pushManager.getSubscription();
+  const post = (path, body) => fetch(path, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!sub || Notification.permission !== 'granted') {
+    box.innerHTML = `<div class="q">Das Cockpit meldet sich von selbst, auch wenn die App zu ist: Bot steht, Position ohne Stop-Loss, Liquidationsgefahr, große Trades, Tagesabschluss.</div>
+      <button class="btn" id="pushon" type="button">Mitteilungen einschalten</button><div class="err" id="pusherr" role="alert"></div>`;
+    document.getElementById('pushon').addEventListener('click', async () => {
+      try {
+        if (await Notification.requestPermission() !== 'granted') throw new Error('Mitteilungen wurden nicht erlaubt. Ändern unter iOS-Einstellungen → Mitteilungen → Cockpit.');
+        sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(info.key) });
+        const r = await post('/api/push/subscribe', { sub: sub.toJSON() });
+        if (!r.ok) throw new Error('Server hat das Abo abgelehnt.');
+        pushPanel(box);
+      } catch (e) { document.getElementById('pusherr').textContent = e.message; }
+    });
+    return;
+  }
+  let prefs = (await api(`/api/push/prefs?endpoint=${encodeURIComponent(sub.endpoint)}`)).prefs;
+  if (!prefs) prefs = (await (await post('/api/push/subscribe', { sub: sub.toJSON() })).json()).prefs;
+  box.innerHTML = `<div class="toggles">${Object.entries(info.categories).map(([k, l]) => `<label class="tg"><span>${esc(l)}</span>
+      <input type="checkbox" class="sw" data-cat="${k}" ${prefs[k] ? 'checked' : ''}></label>`).join('')}</div>
+    <div class="row" style="gap:8px;margin-top:10px"><button class="btn" id="pushtest" type="button">Test senden</button>
+      <button class="btn ghost" id="pushoff" type="button">Ausschalten</button></div><div class="lbl" id="pushmsg"></div>`;
+  box.querySelectorAll('[data-cat]').forEach((c) => c.addEventListener('change', async () => {
+    prefs[c.dataset.cat] = c.checked;
+    await post('/api/push/subscribe', { sub: sub.toJSON(), prefs });
+  }));
+  document.getElementById('pushtest').addEventListener('click', async () => {
+    const r = await (await post('/api/push/test', { endpoint: sub.endpoint })).json();
+    document.getElementById('pushmsg').textContent = r.sent ? 'Gesendet – kommt in wenigen Sekunden.' : 'Senden fehlgeschlagen. Mitteilungen einmal aus- und wieder einschalten.';
+  });
+  document.getElementById('pushoff').addEventListener('click', async () => {
+    await post('/api/push/unsubscribe', { endpoint: sub.endpoint });
+    await sub.unsubscribe();
+    pushPanel(box);
+  });
 }
 
 function viewStats() {
@@ -301,7 +384,9 @@ function statsBody(s) {
   const tt = s.totals;
   const viz = (id, title, sub, q) => `<h2>${title} <small>${sub}</small></h2>
   <div class="card"><p class="q">${q}</p><div id="${id}"><div class="empty">lädt …</div></div></div>`;
-  return `${viz('vizA', 'Rückgang vom Höchststand', '90 Tage', 'Wie tief liege ich unter meinem besten Stand, und wie lange hat die Erholung gedauert?')}
+  return `<h2>Monatsrückblick <small>zum Wischen</small></h2><div class="card"><div id="vizM"><div class="empty">lädt …</div></div></div>
+  ${viz('vizL', 'Live gegen Backtest', 'täglicher Check der Bots', 'Macht jeder Bot live, was sein Backtest erwartet? Zeile antippen zeigt den Grund.')}
+  ${viz('vizA', 'Rückgang vom Höchststand', '90 Tage', 'Wie tief liege ich unter meinem besten Stand, und wie lange hat die Erholung gedauert?')}
   ${viz('vizB', 'Bot-Rennen', 'Start = 100', 'Welcher Bot entwickelt sich am besten, egal wie viel Geld auf seinem Konto liegt?')}
   <h2>${now.toLocaleDateString('de-DE', { month: 'long', year: 'numeric' })} <small>Gewinn pro Tag (USDT)</small></h2>
   <div class="card"><div class="cal">${cells}</div></div>
@@ -309,7 +394,8 @@ function statsBody(s) {
   ${viz('vizD', 'Jeder Trade ein Punkt', '90 Tage', 'Verlieren lange Trades öfter? Tragen wenige Ausreißer das Ergebnis? Punkt antippen.')}
   ${viz('vizE', 'Wann verdienen die Bots?', '90 Tage', 'Summe der Trades je Wochentag und Stunde, in der sie geschlossen wurden. Feld antippen.')}
   ${viz('vizF', 'Wo mein Geld gerade steckt', 'offene Positionen', 'Positionsgröße je Coin über alle Bots, dazu Long gegen Short. Segment antippen.')}
-  <h2>Letzte Trades <small>${tt.count || 0} in 90 Tagen</small></h2>
+  ${viz('vizK', 'Welche Coins bringen Geld?', '90 Tage', 'Gewinn und Verlust je Coin, für jeden Bot einzeln.')}
+  <h2>Letzte Trades <small>${tt.count || 0} in 90 Tagen · antippen für Chart</small></h2>
   <div class="card tight">${tradeRows(s.trades, true)}</div>`;
 }
 
@@ -352,15 +438,16 @@ async function render() {
   if (!state) return;
   const r = route();
   tabs.hidden = false;
-  for (const a of tabs.querySelectorAll('a')) a.classList.toggle('on', a.dataset.tab === (r.name === 'bot' ? 'home' : r.name));
+  for (const a of tabs.querySelectorAll('a')) a.classList.toggle('on', a.dataset.tab === (r.name === 'bot' || r.name === 'trade' ? 'home' : r.name));
   const badge = document.getElementById('badge');
   const crit = state.alerts.filter((a) => a.level !== 'info').length;
   badge.hidden = !crit; badge.textContent = crit;
 
-  const html = r.name === 'bot' ? viewBot(r.arg) : r.name === 'alarme' ? viewAlerts()
+  const html = r.name === 'bot' ? viewBot(r.arg) : r.name === 'trade' ? viewTrade(r.arg) : r.name === 'alarme' ? viewAlerts()
     : r.name === 'auswertung' ? viewStats() : r.name === 'server' ? viewServer() : viewHome();
   app.innerHTML = html;
   document.getElementById('reload')?.addEventListener('click', refresh);
+  document.getElementById('tradeback')?.addEventListener('click', (ev) => { if (history.length > 1) { ev.preventDefault(); history.back(); } });
 
   app.querySelectorAll('[data-range]').forEach((b) => b.addEventListener('click', () => { ui.range = b.dataset.range; render(); }));
   bindGoalForm();
@@ -371,18 +458,33 @@ async function render() {
       const pts = await eq('all');
       const el = document.getElementById('homechart'); if (el) { el.innerHTML = chartWithSummary(pts); bindScrub(el, pts); }
     } else if (r.name === 'bot') {
-      const [pts, st] = await Promise.all([eq(r.arg), api(`/api/stats?bot=${encodeURIComponent(r.arg)}`)]);
+      const [pts, st, trades] = await Promise.all([eq(r.arg), api(`/api/stats?bot=${encodeURIComponent(r.arg)}`), api('/api/trades')]);
       const c = document.getElementById('botchart'); if (c) { c.innerHTML = chartWithSummary(pts); bindScrub(c, pts); }
       const t = document.getElementById('bottrades'); if (t) t.innerHTML = tradeRows(st.trades, false);
+      const k = document.getElementById('botcoins'); if (k) drawCoins(k, trades, r.arg);
+    } else if (r.name === 'trade') {
+      const box = document.getElementById('tradechart');
+      const t = await api(`/api/trade?pid=${encodeURIComponent(r.arg)}`);
+      try {
+        const cd = await api(`/api/candles?symbol=${encodeURIComponent(t.symbol)}&from=${t.ctime}&to=${t.utime}`);
+        if (box) drawTradeChart(box, t, cd);
+      } catch (e) { if (box) box.innerHTML = `<div class="empty">Kerzen konnten nicht geladen werden (${esc(e.message)}).</div>`; }
+    } else if (r.name === 'alarme') {
+      const tl = document.getElementById('timeline');
+      const pb = document.getElementById('pushbox');
+      if (pb) pushPanel(pb).catch((e) => { pb.innerHTML = `<div class="empty">Mitteilungen nicht verfügbar (${esc(e.message)}).</div>`; });
+      const ev = await api('/api/events');
+      if (tl) drawTimeline(tl, ev);
     } else if (r.name === 'auswertung') {
-      const [st, trades, race, dd] = await Promise.all([api('/api/stats?bot=all'), api('/api/trades'),
-        api('/api/race?range=Alles'), api('/api/equity?bot=all&range=Alles&mode=gewinn')]);
+      const [st, trades, race, dd, reports] = await Promise.all([api('/api/stats?bot=all'), api('/api/trades'),
+        api('/api/race?range=Alles'), api('/api/equity?bot=all&range=Alles&mode=gewinn'), api('/api/reports')]);
       const el = document.getElementById('statsbody');
       if (el) {
         el.innerHTML = statsBody(st);
         const box = (id) => document.getElementById(id);
         drawDrawdown(box('vizA'), dd); drawRace(box('vizB'), race); drawCosts(box('vizC'), trades);
         drawScatter(box('vizD'), trades); drawHeatmap(box('vizE'), trades); drawExposure(box('vizF'), state.bots);
+        drawRecap(box('vizM'), trades, dd); drawReports(box('vizL'), reports); drawCoins(box('vizK'), trades);
       }
     }
   } catch (e) { /* Login-Wechsel oder Netzwerk: naechster Refresh versucht es erneut */ }
@@ -446,6 +548,7 @@ let lastTouch = 0;
 document.addEventListener('pointerdown', () => { lastTouch = Date.now(); });
 setInterval(() => {
   if (document.hidden || scrubbing || Date.now() - lastTouch < 45000 || document.querySelector('#goalform:not([hidden])')) return;
+  if (route().name === 'trade') return;
   refresh();
 }, 30000);
 refresh();

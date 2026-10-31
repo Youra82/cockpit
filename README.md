@@ -14,9 +14,10 @@ Eine Web-App, die auf dem iPhone im Vollbild mit eigenem Symbol läuft, wie eine
 | Seite | Inhalt |
 |---|---|
 | Übersicht | Gesamtkapital, PnL heute, offener Gewinn, Bots aktiv, Positionen, Trades heute, Liste der Bots |
-| Bot-Detail | Kontostand mit Kurve (1T/1W/1M/Alles), offene Positionen mit SL/TP und Abstand zur Liquidation, wartende Orders, letzte Trades, Git-Version |
-| Auswertung | Ziel (in der App änderbar), Rückgang vom Höchststand, Bot-Rennen (alle starten bei 100), Kalender mit Gewinn pro Tag, Wasserfall Kursgewinn → Gebühren → Funding → Netto, jeder Trade als Punkt (Haltedauer × Ergebnis), Heatmap Wochentag × Uhrzeit, offene Positionen je Coin mit Long/Short, letzte Trades. Alle Grafiken antippbar |
-| Alarme | Bot läuft nicht, Position ohne Stop-Loss, Liquidation vor Stop-Loss, gleicher Coin in mehreren Bots (Klumpenrisiko), Bitget-Abfrage fehlgeschlagen |
+| Bot-Detail | Kontostand mit Kurve, offene Positionen mit **Preisleiter** (SL, Einstieg, Kurs, TP, Liquidation auf einer Achse), wartende Orders, letzte Trades, Gewinn und Verlust je Coin, Git-Version |
+| Auswertung | Ziel (in der App änderbar), **Monatsrückblick** zum Wischen, **Live gegen Backtest** (Ampel aus dem täglichen Check jedes Bots), Rückgang vom Höchststand, Bot-Rennen (alle starten bei 100), Kalender mit Gewinn pro Tag, Wasserfall Kursgewinn → Gebühren → Funding → Netto, jeder Trade als Punkt (Haltedauer × Ergebnis), Heatmap Wochentag × Uhrzeit, offene Positionen je Coin mit Long/Short, Gewinn je Coin und Bot, letzte Trades. Alle Grafiken antippbar |
+| Trade | Jeder Trade in den Listen ist antippbar: Kerzenchart mit Einstieg und Ausstieg, Ergebnis, Gebühren, Funding |
+| Alarme | Bot läuft nicht, Position ohne Stop-Loss, Liquidation vor Stop-Loss, gleicher Coin in mehreren Bots (Klumpenrisiko), Bitget-Abfrage fehlgeschlagen. Darunter **Mitteilungen** (an/aus je Art) und die **Zeitleiste** der letzten 7 Tage: eröffnet, geschlossen, Stop verschoben, Ein-/Auszahlung, Alarm |
 | Server | Prozessor, RAM, Speicher, Laufzeit, Version und letzter Lauf jedes Bots |
 
 <table>
@@ -75,6 +76,23 @@ Auf dem iPhone:
 2. In **Safari** die Adresse `https://vps-name.tailXXXX.ts.net` öffnen und mit dem Passwort anmelden.
 3. **Teilen** → **Zum Home-Bildschirm**. Ab dann startet das Cockpit wie eine App.
 
+## Mitteilungen aufs iPhone
+
+Das Cockpit kann sich von selbst melden, auch wenn die App zu ist (iOS 16.4 oder neuer).
+
+1. Cockpit **vom Home-Bildschirm** öffnen (in Safari selbst geht es nicht).
+2. Seite **Alarme** → **Mitteilungen einschalten** → erlauben.
+3. **Test senden** antippen. Die Mitteilung kommt nach wenigen Sekunden.
+
+Arten, einzeln abschaltbar: Bot läuft nicht, Position ohne Stop-Loss, Liquidation/Liquidationsgefahr, Klumpenrisiko, Bitget-Fehler (aus), große Trades (ab `push_big_trade_usdt`), Tagesabschluss (ab `push_daily_hour` Uhr), Monatsrückblick am 1.
+Ein Alarm wird erst gemeldet, wenn er zwei Abfragen hintereinander besteht, damit die kurze Lücke zwischen Einstieg und SL-Order keine Mitteilung auslöst. Jeder Alarm kommt nur einmal, auch nach einem Neustart.
+Gesendet wird über Apples Push-Dienst. Die Schlüssel dafür (`data/vapid.pem`) erzeugt der Server beim ersten Start selbst.
+
+## Live gegen Backtest
+
+Die Ampel zeigt das Ergebnis des täglichen Checks, den jeder Bot selbst rechnet (`daily_live_vs_backtest_check.py`). Der Check schreibt dafür zusätzlich `artifacts/db/reports/latest.json`. Das Cockpit liest nur diese Datei und den verlinkten HTML-Bericht und rechnet keinen eigenen Backtest.
+Rot: Einstiege fehlen live oder gibt es nur live. Gelb: Ausstieg weicht ab oder es gibt Hinweise, etwa eine Position ohne SL. Grün: alles gleich. Grau: noch kein oder ein veralteter Bericht (älter als 36 h).
+
 ## Aktualisieren
 
 ```bash
@@ -91,6 +109,8 @@ cd ~/cockpit && bash update.sh
 | `bots_dir` | Ordner, in dem die Bots liegen (Standard: eine Ebene über dem Cockpit) |
 | `goal_usdt`, `goal_start_date`, `goal_date` | Startwerte für den Ziel-Balken auf der Seite Auswertung. In der App über **Ändern** anpassbar, das wird in `data/goal.json` gespeichert und hat Vorrang |
 | `poll_seconds`, `poll_offset_seconds` | Abfragetakt (Standard: 60 s, auf Sekunde 30) |
+| `push_big_trade_usdt` | ab diesem Betrag (Gewinn oder Verlust) gibt es eine Mitteilung „großer Trade“ (Standard 5) |
+| `push_daily_hour` | Uhrzeit des Tagesabschlusses (Standard 21) |
 
 ## Grenzen der ersten Version
 
@@ -100,4 +120,5 @@ cd ~/cockpit && bash update.sh
 - **Heute** beginnt um 0 Uhr, passend zu „Realisiert heute“. Ein Finger auf der Kurve zeigt Wert und Zeitpunkt an dieser Stelle.
 - Liquidationen aus dem Kontoauszug (`burst_…`) der letzten 7 Tage erscheinen als Alarm.
 - Die Trade-Historie wird beim ersten Start mit den letzten 100 geschlossenen Positionen pro Konto gefüllt und wächst danach weiter.
-- Push-Nachrichten und Widgets sind noch nicht eingebaut.
+- Widgets für den Home-Bildschirm gibt es für Web-Apps unter iOS nicht.
+- Der Trade-Chart zeigt Einstieg und Ausstieg. SL und TP eines geschlossenen Trades speichert Bitget in der Trade-Historie nicht, deshalb fehlen sie dort.

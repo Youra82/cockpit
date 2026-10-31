@@ -26,6 +26,8 @@ from urllib.parse import parse_qs, urlparse
 
 import ccxt
 
+import push
+
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(BASE, 'static')
 DATA = os.path.join(BASE, 'data')
@@ -53,6 +55,10 @@ DEFAULTS = {
     'goal_start_date': '2026-10-02',
     'goal_date': '2027-10-02',
     'timezone_offset_hours': 1,
+    # Mitteilungen: Absender-Kennung fuer den Push-Dienst, Schwelle "grosser Trade", Uhrzeit Tagesabschluss
+    'push_contact': 'https://github.com',  # nur Adresse ohne Pfad, sonst lehnt py_vapid ab
+    'push_big_trade_usdt': 5,
+    'push_daily_hour': 21,
 }
 
 log = logging.getLogger('cockpit')
@@ -87,6 +93,10 @@ def parse_goal(body):
     if not 0 < usdt < 1e12 or d1 <= d0:
         raise ValueError
     return {'usdt': usdt, 'start': start, 'end': end}
+
+
+def coin_of(symbol):
+    return (symbol or '').split('/')[0].split(':')[0]
 
 
 def is_transfer(btype):
@@ -212,6 +222,8 @@ class Store:
                 CREATE TABLE IF NOT EXISTS bills (
                     fp TEXT, bid TEXT, ts INTEGER, balance REAL, amount REAL, fee REAL, btype TEXT, symbol TEXT,
                     PRIMARY KEY (fp, bid));
+                CREATE TABLE IF NOT EXISTS events (ts REAL, bot TEXT, kind TEXT, title TEXT, text TEXT);
+                CREATE INDEX IF NOT EXISTS events_ts ON events (ts);
             ''')
             self.db.commit()
 
@@ -290,6 +302,26 @@ class Store:
             self.db.executemany('INSERT OR REPLACE INTO closes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
                                 [(fp, *r) for r in rows])
             self.db.commit()
+
+    def max_utime(self, fp):
+        with self.lock:
+            r = self.db.execute('SELECT MAX(utime) FROM closes WHERE fp=?', (fp,)).fetchone()
+        return r[0] if r else None
+
+    def close_by_pid(self, fps, pid):
+        rows = [r for r in self.closes(fps) if r['pid'] == pid]
+        return rows[0] if rows else None
+
+    def add_event(self, bot, kind, title, text, ts=None):
+        with self.lock:
+            self.db.execute('INSERT INTO events VALUES (?,?,?,?,?)', (ts or time.time(), bot, kind, title, text))
+            self.db.commit()
+
+    def events(self, since):
+        with self.lock:
+            rows = self.db.execute('SELECT ts, bot, kind, title, text FROM events WHERE ts >= ? ORDER BY ts DESC',
+                                   (since,)).fetchall()
+        return [dict(zip(['ts', 'bot', 'kind', 'title', 'text'], r)) for r in rows]
 
     def closes(self, fps, since_ms=0, limit=None):
         q = (f'SELECT fp, pid, symbol, side, open_price, close_price, size, pnl, net, fees, funding, ctime, utime '
@@ -439,6 +471,8 @@ class Poller(threading.Thread):
         self.git_ts = 0
         self.state = {'updated': None, 'bots': [], 'alerts': [], 'server': {}}
         self.markets_client = None
+        self.pusher = None
+        self.seen_alerts, self.reported_alerts = set(), None
 
     def client_for(self, fp, acc):
         a = self.accounts.setdefault(fp, {'client': None, 'data': None, 'error': None, 'ts': None,
@@ -463,6 +497,8 @@ class Poller(threading.Thread):
                        ex.fetch_open_orders(None, params={'type': 'swap', 'productType': PRODUCT,
                                                           'stop': True, 'planType': plan})]
         attach_protection(positions, orders)
+        if a.get('data') is not None:  # erst ab der zweiten Runde vergleichen, sonst waere jede Position "neu"
+            self.position_events(fp, a['data']['positions'], positions)
         a['data'] = {'equity': equity, 'available': available, 'upnl': upnl,
                      'positions': positions, 'orders': orders}
         a['ts'], a['error'] = time.time(), None
@@ -472,10 +508,106 @@ class Poller(threading.Thread):
         if time.time() - a['last_history'] >= self.cfg['history_minutes'] * 60:
             since = int((time.time() - 89 * 86400) * 1000)
             hist = ex.fetch_positions_history(None, since, 100, params={'productType': PRODUCT})
+            known = self.store.max_utime(fp)
             self.store.add_closes(fp, [norm_close(c) for c in hist])
+            if known is not None:
+                self.trade_pushes(fp, known)
             last = self.store.last_bill_ms(fp)
             self.store.add_bills(fp, fetch_bills(ex, (last - 3600 * 1000) if last else 0))
             a['last_history'] = time.time()
+
+    def bot_name(self, fp):
+        return next((b['name'] for b in self.bots if b['fp'] == fp), '?')
+
+    def position_events(self, fp, old, new):
+        """Zeitleiste: neue Position und verschobener Stop-Loss (Vergleich mit der Vorrunde)."""
+        name, before = self.bot_name(fp), {(p['symbol'], p['side']): p for p in old}
+        for p in new:
+            coin, prev = p['symbol'].split('/')[0], before.get((p['symbol'], p['side']))
+            if prev is None:
+                parts = [f"{p['leverage']:g}×" if p.get('leverage') else None,
+                         f"{p['notional']:,.0f} USDT".replace(',', '.') if p.get('notional') else None,
+                         f"SL {p['sl']:g}" if p['sl'] else 'noch kein SL',
+                         f"TP {p['tp']:g}" if p['tp'] else None]
+                self.store.add_event(name, 'open', f"{coin} {p['side']} eröffnet", ' · '.join(x for x in parts if x))
+            elif p['sl'] and prev['sl'] and abs(p['sl'] / prev['sl'] - 1) > 1e-6:
+                self.store.add_event(name, 'stop', f"{coin}: Stop-Loss verschoben", f"{prev['sl']:g} → {p['sl']:g}")
+            elif p['sl'] and not prev['sl']:
+                self.store.add_event(name, 'stop', f"{coin}: Stop-Loss gesetzt", f"{p['sl']:g}")
+
+    def trade_pushes(self, fp, known_utime):
+        if not self.pusher:
+            return
+        for c in self.store.closes([fp], known_utime + 1):
+            if abs(c['net']) >= self.cfg['push_big_trade_usdt']:
+                mins = max(1, (c['utime'] - c['ctime']) / 60000)
+                dur = (f'{mins:.0f} min' if mins < 120 else f'{mins / 60:.1f} h' if mins < 2880
+                       else f'{mins / 1440:.1f} Tagen').replace('.', ',')
+                self.pusher.send('big_trade', f"{self.bot_name(fp)}: {c['symbol'].split('/')[0]} {c['side']} geschlossen",
+                                 f"{c['net']:+.2f} USDT nach {dur}".replace('.', ',', 1), '#/auswertung')
+
+    def alert_pushes(self, alerts, bots, now):
+        """Neue Alarme melden -- erst wenn sie zwei Runden hintereinander bestehen (kurze Luecke zwischen
+        Einstieg und SL-Order soll keine Mitteilung ausloesen)."""
+        def cat(a):
+            t = a['title']
+            return ('bot_down' if t == 'Bot läuft nicht' else 'no_sl' if t == 'Position ohne Stop-Loss'
+                    else 'cluster' if t.startswith('Klumpenrisiko') else 'error' if t.startswith('Bitget') else 'liq')
+        keys = {f"{a['bot']}|{a['title']}|{a['text'].split(' · ')[0]}": a for a in alerts}
+        if self.reported_alerts is None:
+            # Bereits gemeldete Alarme ueberleben Neustarts (update.sh), sonst kaeme jeder Dauer-Alarm erneut
+            self.reported_alerts = set((self.pusher.meta('reported') if self.pusher else None) or [])
+        confirmed = {k for k in keys if k in self.seen_alerts}
+        for k in confirmed - self.reported_alerts:
+            a = keys[k]
+            self.store.add_event(a['bot'], 'alarm', a['title'], a['text'])
+            if self.pusher:
+                url = f"#/bot/{a['bot']}" if a['bot'] else '#/alarme'
+                self.pusher.send(cat(a), f"{a['bot'] + ': ' if a['bot'] else ''}{a['title']}", a['text'], url)
+        reported = (self.reported_alerts & set(keys)) | confirmed
+        if reported != self.reported_alerts and self.pusher:
+            self.pusher.meta('reported', sorted(reported))
+        self.reported_alerts = reported
+        self.seen_alerts = set(keys)
+        self.summary_pushes(bots, now)
+
+    def summary_pushes(self, bots, now):
+        """Tagesabschluss ab push_daily_hour, Monatsrueckblick am 1. -- je einmal."""
+        if not self.pusher or not self.pusher.public_key:
+            return
+        tz = timezone(timedelta(hours=self.cfg['timezone_offset_hours']))
+        loc = datetime.fromtimestamp(now, tz)
+        if loc.hour < self.cfg['push_daily_hour']:
+            return
+        today = loc.strftime('%Y-%m-%d')
+        counted, real, opn, n = set(), 0.0, 0.0, 0
+        for b, item in zip(self.bots, bots):
+            if not b['fp'] or b['fp'] in counted:
+                continue
+            counted.add(b['fp'])
+            real += item['pnl_today']
+            opn += item['upnl'] or 0
+            n += item['trades_today']
+        de = lambda v: f'{v:+.2f}'.replace('.', ',')
+        if self.pusher.meta('daily') != today:
+            self.pusher.meta('daily', today)
+            self.pusher.send('daily', 'Tagesabschluss', f'Realisiert {de(real)} · offen {de(opn)} USDT · {n} Trades', '#/')
+        if loc.day == 1 and self.pusher.meta('monthly') != loc.strftime('%Y-%m'):
+            self.pusher.meta('monthly', loc.strftime('%Y-%m'))
+            first = loc.replace(hour=0, minute=0, second=0, microsecond=0)
+            prev = (first - timedelta(days=1)).replace(day=1)
+            rows = [r for r in self.store.closes(sorted(counted), int(prev.timestamp() * 1000))
+                    if r['utime'] < first.timestamp() * 1000]
+            if rows:
+                by = {}
+                for r in rows:
+                    by[self.bot_name(r['fp'])] = by.get(self.bot_name(r['fp']), 0) + r['net']
+                best = max(by, key=by.get)
+                months = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September',
+                          'Oktober', 'November', 'Dezember']
+                self.pusher.send('monthly', f'Rückblick {months[prev.month - 1]}',
+                                 f'Netto {de(sum(by.values()))} USDT · {len(rows)} Trades · bester Bot {best} {de(by[best])}',
+                                 '#/auswertung')
 
     def poll_once(self):
         seen = set()
@@ -576,6 +708,10 @@ class Poller(threading.Thread):
 
         order = {'crit': 0, 'warn': 1, 'info': 2}
         alerts.sort(key=lambda x: (order[x['level']], -(x['ts'] or 0)))
+        try:
+            self.alert_pushes(alerts, bots, now)
+        except Exception:
+            log.exception('Mitteilungen/Zeitleiste fehlgeschlagen')
         with self.lock:
             self.state = {'updated': now, 'bots': bots, 'alerts': alerts, 'clusters': clusters,
                           'server': server_info(),
@@ -610,6 +746,7 @@ class App:
         with open(key_path) as f:
             self.key = f.read().strip().encode()
         self.token = hmac.new(self.key, str(cfg['password']).encode(), hashlib.sha256).hexdigest()
+        self.public, self.candle_cache = None, {}
 
     def fps_for(self, bot):
         if bot in (None, '', 'all'):
@@ -649,6 +786,85 @@ class App:
                 vals.append(None if cur is None else round(cur, 2))
             out.append({'name': b['name'], 'v': vals})
         return {'t': grid, 'bots': out}
+
+    def events(self, days=7):
+        """Zeitleiste: gespeicherte Ereignisse + geschlossene Trades + Ein-/Auszahlungen, neueste zuerst."""
+        since = time.time() - days * 86400
+        out = [dict(e) for e in self.store.events(since)]
+        for t in self.trades():
+            if t['utime'] / 1000 >= since:
+                mins = max(1, (t['utime'] - t['ctime']) / 60000)
+                out.append({'ts': t['utime'] / 1000, 'bot': t['bot'], 'kind': 'trade', 'net': t['net'],
+                            'title': f"{coin_of(t['sym'])} {t['side']} geschlossen", 'mins': mins})
+        seen = set()
+        for b in self.bots:
+            if not b['fp'] or b['fp'] in seen:
+                continue
+            seen.add(b['fp'])
+            for ts, amt, _, _ in self.store.bills_since(b['fp'], int(since * 1000), 'trans'):
+                out.append({'ts': ts / 1000, 'bot': b['name'], 'kind': 'geld', 'net': amt,
+                            'title': 'Einzahlung' if (amt or 0) > 0 else 'Auszahlung'})
+        out.sort(key=lambda e: -e['ts'])
+        return out[:300]
+
+    def trade(self, pid):
+        r = self.store.close_by_pid(self.fps_for('all'), pid)
+        if not r:
+            return None
+        name = next((b['name'] for b in self.bots if b['fp'] == r['fp']), None)
+        return {**{k: v for k, v in r.items() if k != 'fp'}, 'bot': name}
+
+    def candles(self, symbol, start_ms, end_ms):
+        """Oeffentliche Kerzen fuer den Trade-Chart (kein API-Schluessel, nur beim Antippen eines Trades)."""
+        span = max(60_000, end_ms - start_ms)
+        tfs = [('1m', 60), ('5m', 300), ('15m', 900), ('1h', 3600), ('4h', 14400), ('1d', 86400)]
+        tf, sec = next(((t, x) for t, x in tfs if span / 1000 * 1.6 / x <= 120), tfs[-1])
+        pad = max(span * 0.3, 8 * sec * 1000)
+        since = int(start_ms - pad) // (sec * 1000) * sec * 1000
+        limit = min(200, int((end_ms + pad - since) / (sec * 1000)) + 1)
+        key = (symbol, tf, since, limit)
+        if key not in self.candle_cache:
+            if self.public is None:
+                self.public = ccxt.bitget({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+                src = self.poller.markets_client
+                if src is not None and src.markets:
+                    self.public.set_markets(src.markets, src.currencies)
+            rows = self.public.fetch_ohlcv(symbol, tf, since, limit)
+            if len(self.candle_cache) > 40:
+                self.candle_cache.clear()
+            self.candle_cache[key] = {'tf': tf, 'c': [[int(r[0]), r[1], r[2], r[3], r[4]] for r in rows]}
+        return self.candle_cache[key]
+
+    def reports(self):
+        """Ergebnis des taeglichen Live-gegen-Backtest-Checks der Bots (reports/latest.json, nur lesen)."""
+        out = []
+        for b in self.bots:
+            path = os.path.join(b['path'], 'artifacts', 'db', 'reports', 'latest.json')
+            try:
+                with open(path, encoding='utf-8') as f:
+                    rep = json.load(f)
+            except (OSError, ValueError):
+                out.append({'bot': b['name'], 'status': None})
+                continue
+            rep.pop('html_path', None)
+            out.append({'bot': b['name'], **rep})
+        return out
+
+    def report_html(self, bot):
+        b = next((x for x in self.bots if x['name'] == bot), None)
+        if not b:
+            return None
+        rdir = os.path.realpath(os.path.join(b['path'], 'artifacts', 'db', 'reports'))
+        try:
+            with open(os.path.join(rdir, 'latest.json'), encoding='utf-8') as f:
+                name = os.path.basename(json.load(f).get('html') or '')
+        except (OSError, ValueError):
+            return None
+        path = os.path.realpath(os.path.join(rdir, name))
+        if not name.endswith('.html') or os.path.dirname(path) != rdir or not os.path.isfile(path):
+            return None
+        with open(path, 'rb') as f:
+            return f.read()
 
     def trades(self):
         """Alle geschlossenen Trades der letzten 89 Tage, kompakt (Punktwolke, Heatmap, Kosten)."""
@@ -756,12 +972,68 @@ def make_handler(app):
                 return self.send_json(app.race(q.get('range', 'Alles')))
             if url.path == '/api/trades':
                 return self.send_json(app.trades())
+            if url.path == '/api/events':
+                return self.send_json(app.events())
+            if url.path == '/api/trade':
+                t = app.trade(q.get('pid', ''))
+                return self.send_json(t) if t else self.send_json({'error': 'unbekannt'}, 404)
+            if url.path == '/api/candles':
+                try:
+                    return self.send_json(app.candles(q['symbol'], int(q['from']), int(q['to'])))
+                except (KeyError, ValueError):
+                    return self.send_json({'error': 'ungültig'}, 400)
+                except Exception as e:
+                    return self.send_json({'error': f'{type(e).__name__}: {str(e)[:120]}'}, 502)
+            if url.path == '/api/reports':
+                return self.send_json(app.reports())
+            if url.path == '/api/report':
+                body = app.report_html(q.get('bot', ''))
+                if body is None:
+                    return self.send_error(404)
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                return self.wfile.write(body)
+            if url.path == '/api/push/key':
+                return self.send_json({'key': app.poller.pusher.public_key if app.poller.pusher else None,
+                                       'categories': push.CATEGORIES})
+            if url.path == '/api/push/prefs':
+                prefs = app.poller.pusher.prefs(q.get('endpoint', '')) if app.poller.pusher else None
+                return self.send_json({'prefs': prefs})
+            self.send_error(404)
+
+        def read_json(self):
+            n = min(int(self.headers.get('Content-Length') or 0), 16384)
+            return json.loads(self.rfile.read(n) or b'{}')
+
+        def post_push(self, path):
+            if not self.authed():
+                return self.send_json({'error': 'login'}, 401)
+            pusher = app.poller.pusher
+            if not pusher or not pusher.public_key:
+                return self.send_json({'error': 'Mitteilungen auf dem Server nicht verfügbar'}, 503)
+            try:
+                body = self.read_json()
+                if path == '/api/push/subscribe':
+                    return self.send_json({'prefs': pusher.subscribe(body['sub'], body.get('prefs'))})
+                endpoint = str(body['endpoint'])
+                if path == '/api/push/unsubscribe':
+                    pusher.unsubscribe(endpoint)
+                    return self.send_json({'ok': True})
+                if path == '/api/push/test':
+                    n = pusher.send('test', 'Bot-Cockpit', 'Mitteilungen funktionieren.', '#/alarme', only_endpoint=endpoint)
+                    return self.send_json({'sent': n})
+            except (ValueError, KeyError, TypeError, AttributeError):
+                return self.send_json({'error': 'ungültig'}, 400)
             self.send_error(404)
 
         def do_POST(self):
             path = urlparse(self.path).path
             if path == '/api/goal':
                 return self.post_goal()
+            if path.startswith('/api/push/'):
+                return self.post_push(path)
             if path != '/api/login':
                 return self.send_error(404)
             try:
@@ -806,6 +1078,7 @@ def main():
     with open(os.path.join(DATA, 'server.pid'), 'w') as f:
         f.write(str(os.getpid()))
     poller = Poller(cfg, bots, store)
+    poller.pusher = push.Pusher(DATA, cfg['push_contact'])
     poller.build_state()
     poller.start()
     app = App(cfg, bots, store, poller)

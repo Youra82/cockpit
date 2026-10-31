@@ -348,3 +348,202 @@ function drawExposure(box, bots) {
   svg.addEventListener('pointerdown', rest);
   rest();
 }
+
+// ------------------------------------------------------------------ K: Gewinn/Verlust je Coin
+let coinSel = null;
+function drawCoins(box, trades, fixedBot) {
+  const bots = fixedBot ? [fixedBot] : [...new Set(trades.map((t) => t.bot))].sort();
+  if (!bots.length || !trades.length) return tooFew(box, 'Noch keine geschlossenen Trades.');
+  if (!fixedBot && !bots.includes(coinSel)) coinSel = bots[0];
+  const bot = fixedBot || coinSel;
+  box.innerHTML = fixedBot ? '<div class="rank"></div>' : '<div class="seg wrap" role="group" aria-label="Bot"></div><div class="rank"></div>';
+  if (!fixedBot) {
+    const seg = box.firstChild;
+    bots.forEach((b) => {
+      const bt = document.createElement('button');
+      bt.type = 'button'; bt.textContent = b; bt.className = b === bot ? 'on' : '';
+      bt.addEventListener('click', () => { coinSel = b; drawCoins(box, trades); });
+      seg.appendChild(bt);
+    });
+  }
+  const by = {};
+  trades.filter((t) => t.bot === bot).forEach((t) => {
+    const c = coin(t.sym).split('/')[0];
+    by[c] = by[c] || { v: 0, n: 0, w: 0 };
+    by[c].v += t.net; by[c].n++; if (t.net > 0) by[c].w++;
+  });
+  const rows = Object.entries(by).sort((a, b) => b[1].v - a[1].v);
+  const rank = box.querySelector('.rank');
+  if (!rows.length) { rank.innerHTML = '<div class="empty">Keine Trades in 90 Tagen.</div>'; return; }
+  const m = Math.max(...rows.map(([, r]) => Math.abs(r.v)), 0.01);
+  const shown = rows.length > 12 ? [...rows.slice(0, 6), null, ...rows.slice(-6)] : rows;
+  rank.innerHTML = shown.map((r) => {
+    if (!r) return `<div class="lbl" style="text-align:center">… ${rows.length - 12} Coins dazwischen …</div>`;
+    const [c, x] = r, w = Math.abs(x.v) / m * 50;
+    return `<div class="crow"><b>${esc(c)}</b><div class="cbar"><i style="${x.v >= 0 ? `left:50%;width:${w}%` : `right:50%;width:${w}%`};background:var(${x.v >= 0 ? '--up' : '--down'})"></i></div>
+      <span class="mono ${cls(x.v)}">${signed(x.v)}</span><small>${x.n} Tr. · ${Math.round(x.w / x.n * 100)} %</small></div>`;
+  }).join('');
+  const tot = rows.reduce((s, [, r]) => s + r.v, 0), worst = rows[rows.length - 1];
+  rank.insertAdjacentHTML('beforeend', `<div class="lbl">Summe <b class="mono ${cls(tot)}">${signed(tot)} USDT</b>${rows.length > 1 && worst[1].v < 0
+    ? ` · ohne ${esc(worst[0])} wären es <b class="mono ${cls(tot - worst[1].v)}">${signed(tot - worst[1].v)}</b>` : ''} · rechts: Anzahl Trades und Anteil im Plus</div>`);
+}
+
+// ------------------------------------------------------------------ M: Monatsrueckblick (zum Wischen)
+let recapIdx = 0;
+function drawRecap(box, trades, dd) {
+  const monthKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  const months = {};
+  trades.forEach((t) => { const k = monthKey(new Date(t.utime)); (months[k] = months[k] || []).push(t); });
+  const keys = Object.keys(months).sort().reverse();
+  if (!keys.length) return tooFew(box, 'Noch keine geschlossenen Trades.');
+  recapIdx = Math.min(recapIdx, keys.length - 1);
+  // Rueckgang je Monat aus der Gewinnkurve (Hoechststand laufend ueber alles davor)
+  const ddByMonth = {}, eqStart = {};
+  let peak = -Infinity;
+  (dd || []).forEach((p) => {
+    const k = monthKey(new Date(p.t * 1000));
+    peak = Math.max(peak, p.v);
+    if (!(k in eqStart)) eqStart[k] = p.v;
+    ddByMonth[k] = Math.min(ddByMonth[k] ?? 0, peak > 0 ? (p.v / peak - 1) * 100 : 0);
+  });
+  box.innerHTML = '<div class="recap"></div><div class="pager"></div>';
+  const card = box.firstChild, pg = box.lastChild;
+  keys.forEach((k, i) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.setAttribute('aria-label', k);
+    b.addEventListener('click', () => { recapIdx = i; show(); });
+    pg.appendChild(b);
+  });
+  function show() {
+    const k = keys[recapIdx], rows = months[k];
+    const [yy, mm] = k.split('-').map(Number);
+    const name = new Date(yy, mm - 1, 1).toLocaleDateString('de-DE', { month: 'long', year: 'numeric' });
+    const running = monthKey(new Date()) === k;
+    const net = rows.reduce((s, t) => s + t.net, 0), gross = rows.reduce((s, t) => s + (t.pnl || 0), 0);
+    const fees = rows.reduce((s, t) => s + (t.fees || 0), 0), wins = rows.filter((t) => t.net > 0).length;
+    const by = {};
+    rows.forEach((t) => { by[t.bot] = (by[t.bot] || 0) + t.net; });
+    const ranked = Object.entries(by).sort((a, b) => b[1] - a[1]);
+    const best = ranked[0], worst = ranked[ranked.length - 1];
+    const top = rows.reduce((a, t) => (t.net > a.net ? t : a), rows[0]);
+    const base = eqStart[k], pct = base ? net / base * 100 : null;
+    let hl;
+    if (net > 0 && best[1] > net) hl = `${esc(best[0])} verdient mehr als alle zusammen (${signed(best[1])}), die übrigen Bots kosten ${signed(net - best[1])}.`;
+    else if (net > 0) hl = `${esc(best[0])} trägt ${Math.round(best[1] / net * 100)} % des Gewinns.`;
+    else hl = `${esc(worst[0])} verliert am meisten (${signed(worst[1])}).`;
+    hl += gross > 0 ? ` Gebühren fressen ${Math.round(-fees / gross * 100)} % vom Kursgewinn.`
+      : ` Schon vor Gebühren im Minus (${signed(gross)}), die Gebühren kommen mit ${signed(fees)} dazu.`;
+    card.innerHTML = `<div class="lbl" style="letter-spacing:.06em;text-transform:uppercase">Rückblick ${name}${running ? ' · läuft noch' : ''}</div>
+      <div><span class="rbig ${cls(net)}">${signed(net)} USDT</span>${pct != null ? ` <span class="mono ${cls(net)}">${signed(pct, 1)} %</span>` : ''}</div>
+      <div class="kv">
+        <div>Bester Bot<b>${esc(best[0])} <span class="${cls(best[1])}">${signed(best[1], 0)}</span></b></div>
+        <div>Schwächster Bot<b>${esc(worst[0])} <span class="${cls(worst[1])}">${signed(worst[1], 0)}</span></b></div>
+        <div>Trades · im Plus<b>${rows.length} · ${Math.round(wins / rows.length * 100)} %</b></div>
+        <div>Gebühren<b class="down">${signed(fees, 0)}</b></div>
+        <div>Größter Trade<b class="sm">${esc(top.bot)} ${esc(coin(top.sym).split('/')[0])} <span class="${cls(top.net)}">${signed(top.net)}</span></b></div>
+        <div>Tiefster Rückgang<b class="down">${ddByMonth[k] != null ? nf(ddByMonth[k], 1) + ' %' : '—'}</b></div>
+      </div>
+      <div class="hl">${hl}</div>`;
+    [...pg.children].forEach((b, i) => b.classList.toggle('on', i === recapIdx));
+  }
+  let sx = null;
+  card.addEventListener('pointerdown', (e) => { sx = e.clientX; });
+  card.addEventListener('pointerup', (e) => {
+    if (sx == null) return;
+    const dx = e.clientX - sx; sx = null;
+    if (Math.abs(dx) > 40) { recapIdx = Math.max(0, Math.min(keys.length - 1, recapIdx + (dx < 0 ? 1 : -1))); show(); }
+  });
+  show();
+}
+
+// ------------------------------------------------------------------ J: Zeitleiste
+let feedSel = 'alle';
+function drawTimeline(box, events) {
+  const kinds = { alle: 'Alle', trade: 'Trades', open: 'Eröffnet', stop: 'Stops', geld: 'Ein-/Auszahlung', alarm: 'Alarme' };
+  box.innerHTML = '<div class="seg wrap" role="group" aria-label="Filter"></div><div class="feed"></div>';
+  const seg = box.firstChild, feed = box.lastChild;
+  Object.entries(kinds).forEach(([k, l]) => {
+    const bt = document.createElement('button');
+    bt.type = 'button'; bt.textContent = l; bt.className = k === feedSel ? 'on' : '';
+    bt.addEventListener('click', () => { feedSel = k; drawTimeline(box, events); });
+    seg.appendChild(bt);
+  });
+  const list = events.filter((e) => feedSel === 'alle' || e.kind === feedSel);
+  if (!list.length) { feed.innerHTML = '<div class="empty">Keine Einträge in den letzten 7 Tagen.</div>'; return; }
+  const today = new Date().toDateString(), yest = new Date(Date.now() - 864e5).toDateString();
+  const dur = (m) => (m < 60 ? `${Math.round(m)} min` : m < 2880 ? `${nf(m / 60, 1)} h` : `${nf(m / 1440, 1)} Tagen`);
+  let day = '', html = '';
+  list.forEach((e) => {
+    const d = new Date(e.ts * 1000), ds = d.toDateString();
+    const dl = ds === today ? 'Heute' : ds === yest ? 'Gestern' : d.toLocaleDateString('de-DE', { weekday: 'long', day: '2-digit', month: '2-digit' });
+    if (dl !== day) { html += `<div class="fday">${dl}</div>`; day = dl; }
+    const col = e.kind === 'alarm' ? 'var(--down)' : e.kind === 'geld' ? 'var(--accent)' : e.bot ? botColor(e.bot) : 'var(--muted)';
+    const sub = e.kind === 'trade' ? `<span class="${cls(e.net)}">${signed(e.net)} USDT</span> · nach ${dur(e.mins)}`
+      : e.kind === 'geld' ? `<span class="${cls(e.net)}">${signed(e.net)} USDT</span>` : esc(e.text || '');
+    html += `<div class="fev"><span class="ftm">${d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}</span>
+      <span class="fpt" style="background:${col}"></span>
+      <div class="ftx"><b>${esc(e.title)}</b>${e.bot ? ` <span class="muted">· ${esc(e.bot)}</span>` : ''}<small>${sub}</small></div></div>`;
+  });
+  feed.innerHTML = html;
+}
+
+// ------------------------------------------------------------------ I: Trade im Kerzenchart
+function drawTradeChart(box, t, data) {
+  const C = (data && data.c) || [];
+  if (C.length < 3) return tooFew(box, 'Keine Kerzen für diesen Zeitraum.');
+  const { svg, say } = chartShell(box, 230, 'Kerzenchart des Trades');
+  const lo0 = Math.min(...C.map((k) => k[3]), t.open_price, t.close_price), hi0 = Math.max(...C.map((k) => k[2]), t.open_price, t.close_price);
+  const pad = (hi0 - lo0) * 0.08 || hi0 * 0.01, lo = lo0 - pad, hi = hi0 + pad;
+  const X0 = 6, X1 = 296, Y0 = 8, Y1 = 196, N = C.length, cw = (X1 - X0) / N;
+  const x = (i) => X0 + i * cw + cw / 2, y = (v) => Y0 + (1 - (v - lo) / (hi - lo)) * (Y1 - Y0);
+  const idx = (ms) => { let i = 0; while (i < N - 1 && C[i + 1][0] <= ms) i++; return i; };
+  const iE = idx(t.ctime), iX = idx(t.utime);
+  svgEl('rect', { x: x(iE) - cw / 2, y: Y0, width: x(iX) - x(iE) + cw, height: Y1 - Y0, fill: cssVar('--accent'), 'fill-opacity': 0.08 }, svg);
+  const step = niceTicks(lo, hi, 4);
+  const dec = step.length > 1 ? Math.max(0, Math.min(6, -Math.floor(Math.log10(step[1] - step[0])))) : 4;
+  step.forEach((v) => { svgEl('line', { x1: X0, x2: X1, y1: y(v), y2: y(v), class: 'grid' }, svg); svgText(svg, X1 + 4, y(v) + 3, nf(v, dec)); });
+  [t.open_price, t.close_price].forEach((v) => svgEl('line', { x1: X0, x2: X1, y1: y(v), y2: y(v), class: 'link' }, svg));
+  C.forEach((k, i) => {
+    const col = cssVar(k[4] >= k[1] ? '--up' : '--down');
+    svgEl('line', { x1: x(i), x2: x(i), y1: y(k[2]), y2: y(k[3]), stroke: col }, svg);
+    svgEl('rect', { x: x(i) - cw * 0.32, y: y(Math.max(k[1], k[4])), width: Math.max(1, cw * 0.64), height: Math.max(1, Math.abs(y(k[1]) - y(k[4]))), fill: col }, svg);
+  });
+  const mark = (i, v, label, below) => {
+    const yy = y(v);
+    svgEl('path', { d: below ? `M${x(i)} ${yy + 4} l-5 9 h10 z` : `M${x(i)} ${yy - 4} l-5 -9 h10 z`, fill: cssVar('--text') }, svg);
+    svgText(svg, Math.min(X1 - 24, Math.max(X0 + 24, x(i))), below ? yy + 24 : yy - 16, label, 'middle', true);
+  };
+  const longT = t.side !== 'short';
+  mark(iE, t.open_price, 'Einstieg', longT);
+  mark(iX, t.close_price, 'Ausstieg', !longT);
+  svgText(svg, X0, 214, timeStr(C[0][0]));
+  svgText(svg, X1, 214, `${data.tf}-Kerzen`, 'end');
+  const vl = svgEl('line', { y1: Y0, y2: Y1, class: 'cursor', visibility: 'hidden' }, svg);
+  const mins = (t.utime - t.ctime) / 60000, move = (t.close_price / t.open_price - 1) * 100 * (longT ? 1 : -1);
+  const durTxt = mins < 60 ? `${Math.round(mins)} min` : mins < 2880 ? `${nf(mins / 60, 1)} h` : `${nf(mins / 1440, 1)} Tage`;
+  const rest = () => say(`<span>${esc(t.bot || '')} · ${esc(coin(t.symbol))} ${esc(t.side || '')} · ${price(t.open_price)} → ${price(t.close_price)} (<span class="${cls(move)}">${signed(move, 2)} %</span>)</span>
+    <span>Ergebnis <b class="${cls(t.net)}">${signed(t.net)} USDT</b> · Gebühren ${signed(t.fees)} · Funding ${signed(t.funding)} · ${durTxt}</span>`);
+  rest();
+  scrubX(svg, N, X0 + cw / 2, X1 - cw / 2, (i) => {
+    const k = C[i];
+    vl.setAttribute('x1', x(i)); vl.setAttribute('x2', x(i)); vl.setAttribute('visibility', 'visible');
+    say(`<span>${timeStr(k[0])} · ${data.tf}-Kerze</span><span class="mono">E ${price(k[1])} · H ${price(k[2])} · T ${price(k[3])} · S <b class="${cls(k[4] - k[1])}">${price(k[4])}</b></span>`);
+  }, () => { vl.setAttribute('visibility', 'hidden'); rest(); });
+}
+
+// ------------------------------------------------------------------ L: Live gegen Backtest (Ergebnis der Bot-eigenen Checks)
+function drawReports(box, reports) {
+  const label = { green: ['g', 'passt', 'up'], yellow: ['y', 'auffällig', 'warn'], red: ['r', 'weicht ab', 'down'] };
+  box.innerHTML = reports.map((r) => {
+    const age = r.ts ? (Date.now() / 1000 - r.ts) / 3600 : null;
+    const stale = age != null && age > 36;
+    const [lamp, txt, col] = !r.status ? ['n', 'noch kein Bericht', 'muted'] : stale ? ['n', 'veraltet', 'muted'] : label[r.status] || ['n', '?', 'muted'];
+    const det = !r.status ? 'Der Bot hat noch keine Ergebnisdatei geschrieben. Sie entsteht beim nächsten täglichen Check (ab 08:00 UTC).'
+      : `Gleiche Einstiege <b>${r.same}/${r.sim_n}</b> · fehlt live <b>${r.missing}</b> · nur live <b>${r.extra}</b> · Ausstieg abweichend <b>${r.exit_dev}</b><br>
+         Live <b class="${cls(r.live_pnl)}">${signed(r.live_pnl)}</b> · Simulator <b class="${cls(r.sim_pnl)}">${signed(r.sim_pnl)}</b> USDT · letzte ${r.days} Tage<br>
+         ${(r.flags || []).length ? `Hinweise: ${r.flags.map(esc).join(' · ')}<br>` : ''}
+         Stand ${timeStr(r.ts * 1000)}${stale ? ' (älter als 36 h)' : ''}${r.html ? ` · <a href="/api/report?bot=${encodeURIComponent(r.bot)}" target="_blank" rel="noopener">Bericht öffnen</a>` : ''}`;
+    return `<details class="ampel"><summary><span class="lamp ${lamp}"></span><b>${esc(r.bot)}</b><span class="${col}">${txt}</span>
+      <span class="muted mono" style="font-size:11px">${r.status ? `${r.same}/${r.sim_n}` : ''}</span></summary><div class="det">${det}</div></details>`;
+  }).join('') + '<div class="lbl">Grün: alle Einstiege gleich. Gelb: Einstiege gleich, aber Ausstieg weicht ab oder es gibt Hinweise. Rot: Einstiege fehlen live oder gibt es nur live. Quelle: der tägliche Check jedes Bots.</div>';
+}
