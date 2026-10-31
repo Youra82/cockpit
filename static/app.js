@@ -66,9 +66,11 @@ function pnlSplit(real, open) {
 function chartControls() {
   const seg = (key, opts) => `<div class="seg" role="group">${opts.map(([v, l]) =>
     `<button data-${key}="${v}" class="${ui[key] === v ? 'on' : ''}">${l}</button>`).join('')}</div>`;
-  return `<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
+  // Wertfeld fuer den Finger auf der Kurve: fester Platz oben rechts, damit der Finger es nicht verdeckt
+  return `<div class="ctrls">
     ${seg('mode', [['gewinn', 'Gewinn'], ['konto', 'Kontostand']])}
-    ${seg('range', [['1T', 'Heute'], ['1W', '1W'], ['1M', '1M'], ['Alles', '90T']])}</div>`;
+    ${seg('range', [['1T', 'Heute'], ['1W', '1W'], ['1M', '1M'], ['Alles', '90T']])}
+    <div class="stip" aria-live="polite"></div></div>`;
 }
 
 function chartWithSummary(points) {
@@ -82,7 +84,7 @@ function chartWithSummary(points) {
   // Breite nach laengster Zahl, damit die Kurve daneben bleibt
   return `<div class="chartwrap"><div class="yaxis" style="width:${Math.max(...labels.map((l) => l.length))}ch" aria-hidden="true">${axis}</div>
     <div class="scrub">${chartSvg(points)}
-      <i class="sline" hidden></i><i class="sdot" hidden></i><div class="stip" hidden></div></div></div>
+      <i class="sline" hidden></i><i class="sdot" hidden></i></div></div>
     <div style="display:flex;justify-content:space-between;font-size:12px" class="muted">
       <span>${ui.range === '1T' ? '0 Uhr' : d(first.t)}</span>
       <b class="${cls(diff)}">${signed(diff)} USDT${pct != null ? ` · ${signed(pct, 1)} %` : ''}</b>
@@ -124,7 +126,9 @@ let scrubbing = false;
 function bindScrub(host, points) {
   const box = host?.querySelector('.scrub');
   if (!box || !points || points.length < 2) return;
-  const [line, dot, tip] = ['.sline', '.sdot', '.stip'].map((q) => box.querySelector(q));
+  const [line, dot] = ['.sline', '.sdot'].map((q) => box.querySelector(q));
+  const tip = host.closest('.card')?.querySelector('.stip');
+  if (!tip) return;
   const { H, y } = chartScale(points);
   const svg = box.querySelector('svg');
   const first = points[0].v;
@@ -140,13 +144,10 @@ function bindScrub(host, points) {
     dot.style.top = `${py}px`;
     const diff = p.v - first;
     tip.innerHTML = `<b>${nf(p.v)} USDT</b><span class="${cls(diff)}">${signed(diff)}${first ? ` · ${signed(diff / first * 100, 1)} %` : ''}</span><small>${timeStr(p.t * 1000)}</small>`;
-    line.hidden = dot.hidden = tip.hidden = false;
-    // Wertfeld neben die Linie, auf die Seite mit mehr Platz und weg vom Punkt
-    const gap = 10, tw = tip.offsetWidth, th = tip.offsetHeight;
-    tip.style.left = `${px > r.width / 2 ? Math.max(0, px - gap - tw) : Math.min(r.width - tw, px + gap)}px`;
-    tip.style.top = `${py < r.height / 2 ? r.height - th : 0}px`;
+    line.hidden = dot.hidden = false;
+    tip.classList.add('on');
   };
-  const hide = () => { scrubbing = false; line.hidden = dot.hidden = tip.hidden = true; };
+  const hide = () => { scrubbing = false; line.hidden = dot.hidden = true; tip.classList.remove('on'); };
   box.addEventListener('pointerdown', (ev) => { scrubbing = true; box.setPointerCapture?.(ev.pointerId); show(ev); });
   box.addEventListener('pointermove', (ev) => { if (scrubbing || ev.pointerType === 'mouse') show(ev); });
   ['pointerup', 'pointercancel'].forEach((e) => box.addEventListener(e, hide));

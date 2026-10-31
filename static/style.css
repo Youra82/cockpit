@@ -119,9 +119,6 @@ h2 small { font-size: 12px; color: var(--muted); font-weight: 400; }
 .scrub { position: relative; touch-action: pan-y; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .scrub .sline { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--muted); opacity: .6; pointer-events: none; }
 .scrub .sdot { position: absolute; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; background: var(--text); box-shadow: 0 0 0 3px var(--card); pointer-events: none; }
-.scrub .stip { position: absolute; top: 0; display: grid; gap: 1px; padding: 5px 9px; border-radius: 10px; background: var(--soft); border: 1px solid var(--line); font-size: 12px; white-space: nowrap; pointer-events: none; z-index: 2; }
-.scrub .stip b { font-family: var(--mono); font-size: 13px; }
-.scrub .stip small { color: var(--muted); font-size: 11px; }
 .scrub [hidden] { display: none; }
 .split { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: start; gap: 6px; padding: 12px; margin: 4px 0 2px; border-radius: 14px; background: var(--bg); border: 1px solid var(--line); }
 .split > i { font-style: normal; color: var(--dim); font-size: 16px; padding-top: 20px; }
@@ -132,3 +129,9 @@ h2 small { font-size: 12px; color: var(--muted); font-weight: 400; }
 .chartwrap .scrub { flex: 1; min-width: 0; }
 .yaxis { position: relative; height: 110px; flex: none; font-family: var(--mono); font-size: 10px; color: var(--dim); }
 .yaxis span { position: absolute; right: 0; transform: translateY(-50%); white-space: nowrap; }
+.ctrls { position: relative; display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.stip { position: absolute; top: 0; right: 0; display: grid; gap: 1px; padding: 7px 11px; border-radius: 12px; background: var(--soft); border: 1px solid var(--line); font-size: 12px; text-align: right; white-space: nowrap; pointer-events: none; z-index: 2;
+  opacity: 0; transform: scale(.92); transform-origin: top right; transition: opacity .12s, transform .12s; }
+.stip.on { opacity: 1; transform: none; }
+.stip b { font-family: var(--mono); font-size: 14px; }
+.stip small { color: var(--muted); font-size: 11px; }
