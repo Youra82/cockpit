@@ -140,24 +140,32 @@ function drawRace(box, race) {
 }
 
 // ------------------------------------------------------------------ C: Wasserfall Kursgewinn -> Gebuehren -> Funding -> Netto
-let costSel = 'alle';
+let costSel = 'alle', costPeriod = 'monat';
 function drawCosts(box, trades) {
-  const now = new Date(), monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-  const month = trades.filter((t) => t.utime >= monthStart);
-  const bots = [...new Set(month.map((t) => t.bot))].sort();
-  if (!month.length) return tooFew(box, 'Diesen Monat noch keine geschlossenen Trades.');
+  // Zeitraum nach Schliesszeit der Trades: laufender Monat, Vormonat oder 90 Tage
+  const now = new Date(), yr = now.getFullYear(), mo = now.getMonth();
+  const monthName = (d) => d.toLocaleDateString('de-DE', { month: 'long' });
+  const periods = {
+    monat: { l: 'Dieser Monat', from: new Date(yr, mo, 1).getTime(), to: Infinity, name: monthName(now) },
+    vormonat: { l: 'Letzter Monat', from: new Date(yr, mo - 1, 1).getTime(), to: new Date(yr, mo, 1).getTime(), name: monthName(new Date(yr, mo - 1, 1)) },
+    t90: { l: '90 Tage', from: 0, to: Infinity, name: 'Letzte 90 Tage' },
+  };
+  const per = periods[costPeriod];
+  const inPer = trades.filter((t) => t.utime >= per.from && t.utime < per.to);
+  const bots = [...new Set(inPer.map((t) => t.bot))].sort();
   if (costSel !== 'alle' && !bots.includes(costSel)) costSel = 'alle';
-  box.innerHTML = `<div class="seg wrap" role="group"></div><div class="costbody"></div>`;
-  const seg = box.firstChild, body = box.lastChild;
-  ['alle', ...bots].forEach((k) => {
+  box.innerHTML = `<div class="seg wrap" role="group" aria-label="Zeitraum"></div><div class="seg wrap" role="group" aria-label="Bot"></div><div class="costbody"></div>`;
+  const [segP, seg, body] = box.children;
+  const btn = (parent, label, on, fn) => {
     const bt = document.createElement('button');
-    bt.type = 'button';
-    bt.textContent = k === 'alle' ? 'Alle' : k;
-    bt.className = k === costSel ? 'on' : '';
-    bt.addEventListener('click', () => { costSel = k; drawCosts(box, trades); });
-    seg.appendChild(bt);
-  });
-  const rows = costSel === 'alle' ? month : month.filter((t) => t.bot === costSel);
+    bt.type = 'button'; bt.textContent = label; bt.className = on ? 'on' : '';
+    bt.addEventListener('click', fn);
+    parent.appendChild(bt);
+  };
+  Object.entries(periods).forEach(([k, p]) => btn(segP, p.l, k === costPeriod, () => { costPeriod = k; drawCosts(box, trades); }));
+  if (!inPer.length) { seg.remove(); body.innerHTML = '<div class="empty">In diesem Zeitraum noch keine geschlossenen Trades.</div>'; return; }
+  ['alle', ...bots].forEach((k) => btn(seg, k === 'alle' ? 'Alle' : k, k === costSel, () => { costSel = k; drawCosts(box, trades); }));
+  const rows = costSel === 'alle' ? inPer : inPer.filter((t) => t.bot === costSel);
   const g = rows.reduce((s, t) => s + (t.pnl || 0), 0), f = rows.reduce((s, t) => s + (t.fees || 0), 0);
   const u = rows.reduce((s, t) => s + (t.funding || 0), 0), n = g + f + u;
   const steps = [
@@ -176,7 +184,7 @@ function drawCosts(box, trades) {
   const share = g > 0 ? Math.round(-(f + u) / g * 100) : null;
   const rest = () => {
     bars.forEach((r) => r.setAttribute('opacity', 1));
-    say(`<span>${now.toLocaleDateString('de-DE', { month: 'long' })}${costSel === 'alle' ? ', alle Bots' : `, ${esc(costSel)}`} · ${rows.length} Trades · Netto <b class="${cls(n)}">${signed(n)} USDT</b></span>
+    say(`<span>${per.name}${costSel === 'alle' ? ', alle Bots' : `, ${esc(costSel)}`} · ${rows.length} Trades · Netto <b class="${cls(n)}">${signed(n)} USDT</b></span>
       <span>${share != null ? `Gebühren und Funding fressen <b>${share} %</b> vom Kursgewinn` : 'Kein Kursgewinn – die Kosten kommen obendrauf'}</span>`);
   };
   steps.forEach((s, i) => {
@@ -187,7 +195,7 @@ function drawCosts(box, trades) {
     r.addEventListener('pointerdown', (e) => {
       e.stopPropagation();
       bars.forEach((q, k) => q.setAttribute('opacity', k === i ? 1 : 0.35));
-      say(`<span>${s.l}${costSel === 'alle' ? ' · alle Bots' : ` · ${esc(costSel)}`}</span><span><b class="${cls(s.b - s.a)}">${signed(s.b - s.a)} USDT</b> diesen Monat</span>`);
+      say(`<span>${s.l}${costSel === 'alle' ? ' · alle Bots' : ` · ${esc(costSel)}`}</span><span><b class="${cls(s.b - s.a)}">${signed(s.b - s.a)} USDT</b> · ${per.name}</span>`);
     });
     if (i < 3) svgEl('line', { x1: xa + w, x2: xa + bw, y1: y(s.b), y2: y(s.b), class: 'link' }, svg);
     const lblY = s.b - s.a >= 0 ? top - 4 : top + h + 11;

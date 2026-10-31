@@ -305,7 +305,7 @@ function statsBody(s) {
   ${viz('vizB', 'Bot-Rennen', 'Start = 100', 'Welcher Bot entwickelt sich am besten, egal wie viel Geld auf seinem Konto liegt?')}
   <h2>${now.toLocaleDateString('de-DE', { month: 'long', year: 'numeric' })} <small>Gewinn pro Tag (USDT)</small></h2>
   <div class="card"><div class="cal">${cells}</div></div>
-  ${viz('vizC', 'Wohin das Geld geht', 'dieser Monat', 'Was bringen die Trades, und was fressen Gebühren und Funding wieder auf?')}
+  ${viz('vizC', 'Wohin das Geld geht', 'Zeitraum wählbar', 'Was bringen die Trades, und was fressen Gebühren und Funding wieder auf?')}
   ${viz('vizD', 'Jeder Trade ein Punkt', '90 Tage', 'Verlieren lange Trades öfter? Tragen wenige Ausreißer das Ergebnis? Punkt antippen.')}
   ${viz('vizE', 'Wann verdienen die Bots?', '90 Tage', 'Summe der Trades je Wochentag und Stunde, in der sie geschlossen wurden. Feld antippen.')}
   ${viz('vizF', 'Wo mein Geld gerade steckt', 'offene Positionen', 'Positionsgröße je Coin über alle Bots, dazu Long gegen Short. Segment antippen.')}
