@@ -226,3 +226,27 @@ details.ampel .det a { color: var(--accent); }
 .lamp.y { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
 .lamp.r { background: var(--down); box-shadow: 0 0 8px var(--down); }
 @media (prefers-reduced-motion: reduce) { input.sw, input.sw::after { transition: none; } }
+
+/* Offene Positionen als Liste */
+.psum { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.psum div { display: grid; gap: 2px; font-size: 11.5px; color: var(--muted); }
+.psum b { font-family: var(--mono); font-size: 16px; color: var(--text); font-variant-numeric: tabular-nums; }
+.psum b.up { color: var(--up); } .psum b.down { color: var(--down); }
+.pls { display: grid; gap: 4px; font-size: 11px; color: var(--muted); }
+.pls .bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; gap: 2px; background: none; }
+.pls .bar i { display: block; }
+.pls > div:last-child { display: flex; justify-content: space-between; }
+.plist { display: grid; }
+.prow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; padding: 11px 2px; border-bottom: 1px solid var(--line2); cursor: pointer; }
+.prow:last-child { border-bottom: 0; }
+.prow:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
+.pwho { display: flex; align-items: center; gap: 7px; min-width: 0; font-size: 14px; }
+.pdot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.pbot { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ppnl { font-size: 14px; font-weight: 700; text-align: right; }
+.pmini { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) 74px; gap: 10px; align-items: center; }
+.pmini svg { display: block; width: 100%; height: 22px; }
+.pdist { font-size: 11px; font-family: var(--mono); text-align: right; padding: 2px 6px; border-radius: 6px; white-space: nowrap; }
+.pdist.r { color: var(--down); background: var(--down-bg); } .pdist.y { color: var(--warn); background: var(--warn-bg); } .pdist.g { color: var(--muted); background: var(--soft); }
+.pdet { grid-column: 1 / -1; display: grid; gap: 8px; padding-top: 6px; cursor: default; }
+.pgo { color: var(--accent); font-size: 13px; }

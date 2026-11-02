@@ -188,7 +188,20 @@ function viewHome() {
       <div class="r"><b class="${cls(b.pnl_today)}">${b.has_key ? signed(b.pnl_today) : '—'}</b>
         <span>${b.has_key ? `${nf(b.equity)} USDT · ${b.positions.length} Pos.` : ''}</span></div>
       ${icon.chev}</a>`;
-  }).join('')}`;
+  }).join('')}
+  <h2>Alle offenen Positionen <small>${t.positions} in ${state.bots.filter((b) => b.positions.length).length} Bots · antippen</small></h2>
+  <div class="card" id="allpos"></div>`;
+}
+
+// Positionen aller Bots, gemeinsam genutzte Konten nur einmal
+function allPositions() {
+  const counted = new Set(), out = [];
+  for (const b of state.bots) {
+    if (!b.has_key || b.shared_with.some((n) => counted.has(n))) continue;
+    counted.add(b.name);
+    b.positions.forEach((p) => out.push({ ...p, bot: b.name }));
+  }
+  return out;
 }
 
 function viewBot(name) {
@@ -208,7 +221,7 @@ function viewBot(name) {
     <span class="lbl">Frei verfügbar: ${nf(b.available)} USDT</span>
   </div>
   <h2>Offene Positionen <small>${b.positions.length}</small></h2>
-  ${b.positions.length ? b.positions.map(posCard).join('') : '<div class="card"><div class="empty">Keine offene Position</div></div>'}
+  <div class="card" id="botpos"></div>
   ${otherOrders.length ? `<h2>Wartende Orders <small>${otherOrders.length}</small></h2>
     <div class="card tight">${otherOrders.slice(0, 8).map((o) => `<div class="li"><span class="grow">${esc(coin(o.symbol))}</span>
       <span class="muted">${o.kind === 'trigger' ? 'Trigger' : 'Limit'} ${esc(o.side || '')}</span>
@@ -221,22 +234,12 @@ function viewBot(name) {
   ${b.git ? `<div class="lbl" style="text-align:center">Version ${esc(b.git.hash)} · ${esc(b.git.subject)}</div>` : ''}`;
 }
 
-function posCard(p) {
-  // SL greift vor der Liquidation -> Abstand ist unkritisch, nur grau zeigen
-  const slFirst = p.sl && p.liq && (p.side === 'long' ? p.sl > p.liq : p.sl < p.liq);
+// SL greift vor der Liquidation -> Abstand ist unkritisch, nur grau zeigen
+function liqInfo(p) {
+  const slFirst = Boolean(p.sl && p.liq && (p.side === 'long' ? p.sl > p.liq : p.sl < p.liq));
   const liqCol = p.liq_pct == null ? 'var(--muted)' : slFirst ? 'var(--dim)'
     : p.liq_pct < 8 ? 'var(--down)' : p.liq_pct < 15 ? 'var(--warn)' : 'var(--up)';
-  return `<div class="pos">
-    <div class="row"><b>${esc(coin(p.symbol))}</b><span class="side ${p.side === 'short' ? 'short' : 'long'}">${esc((p.side || '').toUpperCase())}</span>
-      <span class="lbl">${p.leverage ? nf(p.leverage, 0) + '×' : ''}</span><span style="flex:1"></span>
-      <b class="mono ${cls(p.upnl)}">${signed(p.upnl)} USDT</b></div>
-    <div class="grid4">
-      <span>Einstieg<b>${price(p.entry)}</b></span><span>Aktuell<b>${price(p.mark)}</b></span>
-      <span>SL<b class="${p.sl ? 'down' : 'warn'}">${p.sl ? price(p.sl) : 'FEHLT'}</b></span>
-      <span>TP<b class="${p.tp ? 'up' : 'muted'}">${p.tp ? price(p.tp) : '—'}</b></span>
-    </div>
-    ${ladder(p, slFirst, liqCol)}
-  </div>`;
+  return { slFirst, liqCol };
 }
 
 // Preisleiter: SL, Einstieg, Kurs, TP (und Liquidation, falls sie vor dem SL liegt) auf einer Achse
@@ -453,6 +456,9 @@ async function render() {
   bindGoalForm();
   app.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => { ui.mode = b.dataset.mode; render(); }));
   const eq = (bot) => api(`/api/equity?bot=${encodeURIComponent(bot)}&range=${ui.range}&mode=${ui.mode}`);
+  const ap = document.getElementById('allpos'); if (ap) drawPositions(ap, allPositions(), true);
+  const bp = document.getElementById('botpos');
+  if (bp) { const bb = state.bots.find((x) => x.name === r.arg); drawPositions(bp, bb.positions.map((p) => ({ ...p, bot: bb.name })), false); }
   try {
     if (r.name === 'home') {
       const pts = await eq('all');

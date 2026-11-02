@@ -547,3 +547,68 @@ function drawReports(box, reports) {
       <span class="muted mono" style="font-size:11px">${r.status ? `${r.same}/${r.sim_n}` : ''}</span></summary><div class="det">${det}</div></details>`;
   }).join('') + '<div class="lbl">Grün: alle Einstiege gleich. Gelb: Einstiege gleich, aber Ausstieg weicht ab oder es gibt Hinweise. Rot: Einstiege fehlen live oder gibt es nur live. Quelle: der tägliche Check jedes Bots.</div>';
 }
+
+// ------------------------------------------------------------------ Offene Positionen als kompakte Liste (Übersicht: alle Bots, Bot-Seite: ein Bot)
+let posSort = 'gefahr';
+const posOpen = new Set();
+function drawPositions(box, rows, withBot) {
+  if (!rows.length) { box.innerHTML = '<div class="empty">Keine offene Position</div>'; return; }
+  const toSl = (p) => (p.sl && p.mark ? Math.abs(p.mark / p.sl - 1) * 100 : null);
+  const sorts = {
+    gefahr: ['Gefahr zuerst', (a, b) => (toSl(a) ?? -1) - (toSl(b) ?? -1)],
+    verlust: ['Verlust zuerst', (a, b) => (a.upnl || 0) - (b.upnl || 0)],
+    gewinn: ['Gewinn zuerst', (a, b) => (b.upnl || 0) - (a.upnl || 0)],
+  };
+  if (withBot) sorts.bot = ['Nach Bot', (a, b) => a.bot.localeCompare(b.bot) || (toSl(a) ?? -1) - (toSl(b) ?? -1)];
+  if (!sorts[posSort]) posSort = 'gefahr';
+  const tot = rows.reduce((s, p) => s + (p.upnl || 0), 0), plus = rows.filter((p) => p.upnl > 0).length;
+  const danger = rows.filter((p) => toSl(p) == null || toSl(p) < 2).length, longs = rows.filter((p) => p.side !== 'short').length;
+  box.innerHTML = `<div class="psum"><div>Offen zusammen<b class="${cls(tot)}">${signed(tot)}</b></div>
+      <div>Im Plus<b>${plus} / ${rows.length}</b></div><div>Nah am SL<b class="${danger ? 'down' : ''}">${danger}</b></div></div>
+    <div class="pls"><div class="bar"><i style="flex:${longs};background:var(--up)"></i><i style="flex:${rows.length - longs};background:var(--down)"></i></div>
+      <div><span>${longs} Long</span><span>${rows.length - longs} Short</span></div></div>
+    <div class="seg wrap" role="group" aria-label="Sortierung"></div><div class="plist"></div>
+    <div class="lbl">Balken: SL (rot), Einstieg (grau), Kurs (●), TP (grün). Rechts der Abstand zum Stop-Loss: rot unter 2 %, gelb unter 5 %.</div>`;
+  const seg = box.querySelector('.seg');
+  Object.entries(sorts).forEach(([k, [l]]) => {
+    const bt = document.createElement('button');
+    bt.type = 'button'; bt.textContent = l; bt.className = k === posSort ? 'on' : '';
+    bt.addEventListener('click', () => { posSort = k; drawPositions(box, rows, withBot); });
+    seg.appendChild(bt);
+  });
+  const mini = (p) => {
+    const vals = [p.sl, p.tp, p.entry, p.mark].filter((v) => v), lo = Math.min(...vals), hi = Math.max(...vals);
+    const x = (v) => (hi > lo ? 4 + (v - lo) / (hi - lo) * 192 : 100).toFixed(1);
+    const zone = (a, b, c) => (a && b ? `<rect x="${Math.min(x(a), x(b))}" y="8" width="${Math.abs(x(a) - x(b)).toFixed(1)}" height="6" rx="2" fill="${c}" fill-opacity=".3"/>` : '');
+    const tick = (v, c, h) => (v ? `<line x1="${x(v)}" x2="${x(v)}" y1="${11 - h}" y2="${11 + h}" stroke="${c}" stroke-width="2"/>` : '');
+    return `<svg viewBox="0 0 200 22" preserveAspectRatio="none" aria-hidden="true"><line x1="4" x2="196" y1="11" y2="11" stroke="var(--line)" stroke-width="2"/>
+      ${zone(p.sl, p.entry, 'var(--down)')}${zone(p.entry, p.tp, 'var(--up)')}${tick(p.sl, 'var(--down)', 8)}${tick(p.tp, 'var(--up)', 8)}${tick(p.entry, 'var(--muted)', 6)}
+      <circle cx="${x(p.mark)}" cy="11" r="4.5" fill="var(--text)" stroke="var(--card)" stroke-width="2"/></svg>`;
+  };
+  const list = box.querySelector('.plist');
+  [...rows].sort(sorts[posSort][1]).forEach((p) => {
+    const id = `${p.bot}|${p.symbol}|${p.side}`, d = toSl(p), open = posOpen.has(id);
+    const dc = d == null || d < 2 ? 'r' : d < 5 ? 'y' : 'g';
+    const { slFirst, liqCol } = liqInfo(p);
+    const row = document.createElement('div');
+    row.className = 'prow'; row.tabIndex = 0; row.setAttribute('role', 'button'); row.setAttribute('aria-expanded', String(open));
+    row.innerHTML = `<div class="pwho">${withBot ? `<span class="pdot" style="background:${botColor(p.bot)}"></span>` : ''}<b>${esc(coin(p.symbol).split('/')[0])}</b>
+        <span class="side ${p.side === 'short' ? 'short' : 'long'}">${esc((p.side || '').toUpperCase())}</span>
+        <span class="pbot">${p.leverage ? nf(p.leverage, 0) + '×' : ''}${withBot ? ` · ${esc(p.bot)}` : ''}</span></div>
+      <div class="ppnl mono ${cls(p.upnl)}">${signed(p.upnl)}</div>
+      <div class="pmini">${mini(p)}<span class="pdist ${dc}">${d == null ? 'kein SL' : `SL ${nf(d, 1)} %`}</span></div>
+      ${open ? `<div class="pdet"><div class="grid4"><span>Einstieg<b>${price(p.entry)}</b></span><span>Aktuell<b>${price(p.mark)}</b></span>
+          <span>SL<b class="${p.sl ? 'down' : 'warn'}">${p.sl ? price(p.sl) : 'FEHLT'}</b></span><span>TP<b class="${p.tp ? 'up' : 'muted'}">${p.tp ? price(p.tp) : '—'}</b></span></div>
+        ${ladder(p, slFirst, liqCol)}
+        <div class="lbl">Größe ${nf(p.notional || 0)} USDT · Margin ${nf(p.margin || 0)} USDT${p.opened ? ` · offen seit ${timeStr(p.opened)}` : ''}</div>
+        ${withBot ? `<a class="pgo" href="#/bot/${encodeURIComponent(p.bot)}">zur ${esc(p.bot)}-Seite ›</a>` : ''}</div>` : ''}`;
+    const toggle = (ev) => {
+      if (ev.target.closest('a, .pdet')) return;  // in den aufgeklappten Details nicht wieder zuklappen
+      open ? posOpen.delete(id) : posOpen.add(id);
+      drawPositions(box, rows, withBot);
+    };
+    row.addEventListener('click', toggle);
+    row.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggle(ev); } });
+    list.appendChild(row);
+  });
+}
