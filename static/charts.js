@@ -185,7 +185,9 @@ function drawCosts(box, trades) {
   const rest = () => {
     bars.forEach((r) => r.setAttribute('opacity', 1));
     say(`<span>${per.name}${costSel === 'alle' ? ', alle Bots' : `, ${esc(costSel)}`} · ${rows.length} Trades · Netto <b class="${cls(n)}">${signed(n)} USDT</b></span>
-      <span>${share != null ? `Gebühren und Funding fressen <b>${share} %</b> vom Kursgewinn` : 'Kein Kursgewinn – die Kosten kommen obendrauf'}</span>`);
+      <span>${share == null ? 'Kein Kursgewinn – die Kosten kommen obendrauf'
+        : share > 200 ? `Gebühren und Funding sind <b>${nf(share / 100, 0)}-mal</b> so hoch wie der Kursgewinn`
+        : `Gebühren und Funding fressen <b>${share} %</b> vom Kursgewinn`}</span>`);
   };
   steps.forEach((s, i) => {
     const xa = X0 + i * bw + 10, w = bw - 20, top = y(Math.max(s.a, s.b)), h = Math.max(2, Math.abs(y(s.a) - y(s.b)));
@@ -622,4 +624,267 @@ function drawPositions(box, rows, withBot) {
     row.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggle(ev); } });
     list.appendChild(row);
   });
+}
+
+// ------------------------------------------------------------------ N: Worst-Case (alle SL greifen / BTC-Szenario)
+let worstMove = -5;
+function drawWorst(box, rows, market, equity) {
+  if (!rows.length) return tooFew(box, 'Keine offene Position.');
+  const dir = (p) => (p.side === 'short' ? -1 : 1);
+  const atStop = (p) => (p.sl ? (p.sl - p.entry) * p.size * dir(p) : -(p.margin || 0));  // ohne SL: Margin weg (Liquidation)
+  const by = {};
+  rows.forEach((p) => { by[p.bot] = (by[p.bot] || 0) + atStop(p); });
+  const all = Object.values(by).reduce((s, v) => s + v, 0), now = rows.reduce((s, p) => s + (p.upnl || 0), 0);
+  const noSl = rows.filter((p) => !p.sl).length, max = Math.max(...Object.values(by).map(Math.abs), 0.01);
+  box.innerHTML = `<div class="nbox"><span class="lbl">Wenn alle ${rows.length} Stop-Losses gleichzeitig greifen</span>
+      <div><span class="nbig ${cls(all)}">${signed(all)} USDT</span> <span class="mono ${cls(all)}">${equity ? signed(all / equity * 100, 1) + ' % vom Konto' : ''}</span></div>
+      <span class="lbl">Gegenüber jetzt (offen ${signed(now)}) wären das ${signed(all - now)} USDT.${noSl ? ` ${noSl} Position${noSl > 1 ? 'en' : ''} ohne SL: dort mit Verlust der ganzen Margin gerechnet.` : ''}</span>
+      <div class="rank">${Object.entries(by).sort((a, b) => a[1] - b[1]).map(([b, v]) => `<div class="crow" style="grid-template-columns:64px minmax(0,1fr) 70px">
+        <b style="color:${botColor(b)}">${esc(b)}</b><div class="cbar fee"><i style="left:0;width:${Math.abs(v) / max * 100}%;background:var(${v >= 0 ? '--up' : '--down'})"></i></div>
+        <span class="mono ${cls(v)}">${signed(v)}</span></div>`).join('')}</div></div>
+    <div class="nbox"><div class="row2"><span class="lbl">Szenario: BTC bewegt sich um</span><b class="mono" id="wv"></b></div>
+      <input type="range" id="wslider" min="-20" max="20" step="1" value="${worstMove}" aria-label="BTC-Bewegung in Prozent">
+      <div class="row2"><span>Offenes Ergebnis danach (geschätzt)</span><b class="mono" id="wres"></b></div><span class="lbl" id="whit"></span></div>
+    <div class="lbl">Ohne Gebühren gerechnet. Szenario: Jeder Coin bewegt sich wie BTC mal seinem Beta der letzten 30 Tage${market ? '' : ' (Marktdaten fehlen, Beta = 1)'}.</div>`;
+  const sl = box.querySelector('#wslider');
+  const upd = () => {
+    worstMove = Number(sl.value);
+    let res = 0, hits = [];
+    rows.forEach((p) => {
+      const beta = market?.beta?.[p.symbol] ?? 1, np = p.mark * (1 + worstMove / 100 * beta);
+      const hitSl = p.sl && (dir(p) > 0 ? np <= p.sl : np >= p.sl), hitLiq = !p.sl && p.liq && (dir(p) > 0 ? np <= p.liq : np >= p.liq);
+      if (hitSl || hitLiq) { res += atStop(p); hits.push(`${coin(p.symbol).split('/')[0]} (${p.bot})`); } else res += (np - p.entry) * p.size * dir(p);
+    });
+    box.querySelector('#wv').textContent = `${worstMove > 0 ? '+' : ''}${worstMove} %`;
+    box.querySelector('#wv').className = `mono ${cls(worstMove)}`;
+    box.querySelector('#wres').innerHTML = `<span class="${cls(res)}">${signed(res)} USDT</span> <span class="muted">(${signed(res - now)})</span>`;
+    box.querySelector('#whit').textContent = hits.length ? `Dabei würden ${hits.length} Stops greifen: ${hits.join(', ')}.` : 'Dabei würde kein Stop greifen.';
+  };
+  sl.addEventListener('input', upd);
+  sl.addEventListener('pointerdown', () => { scrubbing = true; });
+  sl.addEventListener('change', () => { scrubbing = false; });
+  upd();
+}
+
+// ------------------------------------------------------------------ R: Funding-Uhr
+let fundTimer = null;
+function drawFunding(box, rows, market) {
+  if (fundTimer) { clearInterval(fundTimer); fundTimer = null; }
+  if (!rows.length) return tooFew(box, 'Keine offene Position.');
+  if (!market?.funding) return tooFew(box, 'Funding-Raten gerade nicht verfügbar.');
+  const list = rows.map((p) => {
+    const f = market.funding[p.symbol] || {}, rate = f.rate ?? 0;
+    return { ...p, rate, next: f.next, pay: (p.side === 'short' ? 1 : -1) * rate * (p.notional || 0) };
+  });
+  const next = Math.min(...list.map((p) => p.next).filter((v) => v));
+  const due = list.filter((p) => p.next === next), sumDue = due.reduce((s, p) => s + p.pay, 0);
+  box.innerHTML = `<div class="nbox"><div class="row2"><span class="lbl">Nächste Zahlung in</span><span class="fclock" id="fclock">–</span></div>
+      <div class="row2"><span>Fällig dann (${due.length} Position${due.length === 1 ? '' : 'en'})</span><b class="mono ${cls(sumDue)}">${signed(sumDue, 4)} USDT</b></div></div>
+    <div class="rank">${[...list].sort((a, b) => a.pay - b.pay).map((p) => `<div class="crow" style="grid-template-columns:64px minmax(0,1fr) 66px">
+      <b style="color:${botColor(p.bot)}">${esc(p.bot)}</b><span class="lbl">${esc(coin(p.symbol).split('/')[0])} ${esc(p.side)} · Rate ${signed(p.rate * 100, 4)} %${p.next && p.next !== next ? ` · ${timeStr(p.next).split(', ')[1]}` : ''}</span>
+      <span class="mono ${cls(p.pay)}">${signed(p.pay, 4)}</span></div>`).join('')}</div>
+    <div class="lbl">Long zahlt bei positiver Rate, Short bekommt sie (und umgekehrt). Betrag = Rate × Positionsgröße.</div>`;
+  const clock = box.querySelector('#fclock');
+  const tick = () => {
+    if (!document.body.contains(clock)) { clearInterval(fundTimer); return; }
+    const s = Math.max(0, Math.round((next - Date.now()) / 1000));
+    clock.textContent = [s / 3600, (s % 3600) / 60, s % 60].map((n) => String(Math.floor(n)).padStart(2, '0')).join(':');
+  };
+  tick();
+  fundTimer = setInterval(tick, 1000);
+}
+
+// ------------------------------------------------------------------ O: Bots gegen BTC halten
+let vsSpan = 90;
+function drawVsBtc(box, pts, market) {
+  if (!pts || pts.length < 3 || !market?.btc?.length) return tooFew(box, 'Noch zu wenig Daten.');
+  box.innerHTML = '<div class="seg wrap" role="group" aria-label="Zeitraum"></div><div class="vsbody"></div>';
+  const seg = box.firstChild, body = box.lastChild;
+  [30, 60, 90].forEach((d) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = `${d} T`; b.className = d === vsSpan ? 'on' : '';
+    b.addEventListener('click', () => { vsSpan = d; drawVsBtc(box, pts, market); });
+    seg.appendChild(b);
+  });
+  const since = Date.now() / 1000 - vsSpan * 86400, P = pts.filter((p) => p.t >= since);
+  if (P.length < 3) return tooFew(body, 'Noch zu wenig Daten.');
+  const btcAt = (t) => { let c = market.btc[0][1]; for (const [ts, v] of market.btc) { if (ts / 1000 <= t) c = v; else break; } return c; };
+  const b = P.map((p) => p.v / P[0].v * 100), c0 = btcAt(P[0].t), c = P.map((p) => btcAt(p.t) / c0 * 100), N = P.length;
+  const { svg, say } = chartShell(body, 172, 'Bots gegen BTC halten');
+  const lo = Math.min(...b, ...c), hi = Math.max(...b, ...c), X0 = 32, X1 = 352, Y0 = 8, Y1 = 150;
+  const x = (i) => X0 + i / (N - 1) * (X1 - X0), y = (v) => Y0 + (1 - (v - lo) / (hi - lo || 1)) * (Y1 - Y0);
+  niceTicks(lo, hi, 3).forEach((v) => { svgEl('line', { x1: X0, x2: X1, y1: y(v), y2: y(v), class: 'grid' }, svg); svgText(svg, X0 - 5, y(v) + 3, nf(v, 0), 'end'); });
+  svgEl('path', { d: c.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' '), fill: 'none', stroke: 'var(--btc)', 'stroke-width': 1.6, 'stroke-dasharray': '4 3' }, svg);
+  svgEl('path', { d: b.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' '), fill: 'none', stroke: 'var(--accent)', 'stroke-width': 2 }, svg);
+  svgText(svg, X0, 168, dayStr(P[0].t * 1000)); svgText(svg, X1, 168, 'heute', 'end');
+  const vl = svgEl('line', { y1: Y0, y2: Y1, class: 'cursor', visibility: 'hidden' }, svg);
+  const d1 = svgEl('circle', { r: 4, fill: 'var(--accent)', visibility: 'hidden' }, svg), d2 = svgEl('circle', { r: 4, fill: 'var(--btc)', visibility: 'hidden' }, svg);
+  const show = (i, pick) => {
+    const d = b[i] - c[i];
+    say(`<span><b style="color:var(--accent)">━ Bots</b> ${signed(b[i] - 100, 1)} % · <b style="color:var(--btc)">┅ BTC halten</b> ${signed(c[i] - 100, 1)} %</span>
+      <span>${pick ? timeStr(P[i].t * 1000) : `Letzte ${vsSpan} Tage`} · Bots ${d >= 0 ? 'vorn' : 'hinten'}: <b class="${cls(d)}">${signed(d, 1)} Punkte</b></span>`);
+  };
+  show(N - 1, false);
+  scrubX(svg, N, X0, X1, (i) => {
+    [vl].forEach((l) => { l.setAttribute('x1', x(i)); l.setAttribute('x2', x(i)); l.setAttribute('visibility', 'visible'); });
+    d1.setAttribute('cx', x(i)); d1.setAttribute('cy', y(b[i])); d1.setAttribute('visibility', 'visible');
+    d2.setAttribute('cx', x(i)); d2.setAttribute('cy', y(c[i])); d2.setAttribute('visibility', 'visible');
+    show(i, true);
+  }, () => { [vl, d1, d2].forEach((e) => e.setAttribute('visibility', 'hidden')); show(N - 1, false); });
+}
+
+// ------------------------------------------------------------------ P: Ziel-Prognose
+let fcSpan = 30;
+function drawForecast(box, pts, goal) {
+  if (!pts || pts.length < 3) return tooFew(box, 'Noch zu wenig Verlauf.');
+  const nowT = pts[pts.length - 1].t, nowV = pts[pts.length - 1].v;
+  const valueAt = (t) => { let v = pts[0].v; for (const p of pts) { if (p.t <= t) v = p.v; else break; } return v; };
+  const rate = (k) => { const v0 = valueAt(nowT - k * 86400); return v0 > 0 ? Math.pow(nowV / v0, 1 / k) - 1 : null; };
+  box.innerHTML = '<div class="seg wrap" role="group" aria-label="Tempo"></div><div class="nbox fcbox"></div><svg class="viz" viewBox="0 0 360 124" aria-label="Prognose"></svg><div class="lbl">Tempo = durchschnittliches Wachstum pro Tag im gewählten Zeitraum, hochgerechnet mit Zinseszins. Eine Rechnung, keine Vorhersage.</div>';
+  const seg = box.querySelector('.seg'), info = box.querySelector('.fcbox'), svg = box.querySelector('svg');
+  [7, 30, 90].forEach((k) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = `Tempo ${k} Tage`; b.className = k === fcSpan ? 'on' : '';
+    b.addEventListener('click', () => { fcSpan = k; drawForecast(box, pts, goal); });
+    seg.appendChild(b);
+  });
+  const r = rate(fcSpan), endDate = new Date(goal.end), daysLeft = (endDate.getTime() / 1000 - nowT) / 86400;
+  if (r == null || r <= 0) {
+    info.innerHTML = `<div class="row2"><span class="lbl">Tempo der letzten ${fcSpan} Tage</span><b class="mono down">${r == null ? '—' : signed(r * 100, 2) + ' % pro Tag'}</b></div>
+      <div style="font-size:15px">Bei diesem Tempo wird das Ziel von ${nf(goal.usdt, 0)} USDT <b class="down">nicht erreicht</b>.</div>`;
+    svg.remove();  // ohne Zieldatum gibt es nichts zu zeichnen
+    return;
+  }
+  const days = Math.log(goal.usdt / nowV) / Math.log(1 + r), when = new Date((nowT + days * 86400) * 1000);
+  const diff = Math.round(days - daysLeft), year = Math.pow(1 + r, 365) - 1;
+  info.innerHTML = `<div class="row2"><span class="lbl">Tempo der letzten ${fcSpan} Tage</span><b class="mono up">${signed(r * 100, 2)} % pro Tag</b></div>
+    <div style="font-size:15px">Ziel ${nf(goal.usdt, 0)} USDT am <b>${when.toLocaleDateString('de-DE', { day: 'numeric', month: 'long', year: 'numeric' })}</b></div>
+    <div class="row2"><span class="lbl">${nf(year * 100, 0)} % pro Jahr</span><span class="lbl ${diff <= 0 ? 'up' : 'down'}">${Math.abs(diff)} Tage ${diff <= 0 ? 'vor' : 'nach'} deinem Zieldatum</span></div>`;
+  const maxD = Math.max(days, daysLeft) * 1.05, X0 = 8, X1 = 352, Y0 = 10, Y1 = 104;
+  const lo = Math.log10(nowV), hi = Math.log10(goal.usdt) + 0.15, x = (d) => X0 + d / maxD * (X1 - X0), y = (v) => Y0 + (1 - (v - lo) / (hi - lo)) * (Y1 - Y0);
+  svgEl('line', { x1: X0, x2: X1, y1: y(Math.log10(goal.usdt)), y2: y(Math.log10(goal.usdt)), stroke: 'var(--up)', 'stroke-dasharray': '4 3' }, svg);
+  svgText(svg, X0, y(Math.log10(goal.usdt)) - 4, `Ziel ${nf(goal.usdt, 0)}`);
+  if (daysLeft > 0) {
+    svgEl('line', { x1: x(daysLeft), x2: x(daysLeft), y1: Y0, y2: Y1, stroke: 'var(--warn)', 'stroke-dasharray': '3 3' }, svg);
+    svgText(svg, x(daysLeft) - 4, Y1 - 4, 'dein Zieldatum', 'end');
+  }
+  const path = Array.from({ length: 60 }, (_, i) => { const d = i / 59 * maxD; return `${i ? 'L' : 'M'}${x(d).toFixed(1)} ${y(Math.min(hi, lo + d * Math.log10(1 + r))).toFixed(1)}`; }).join(' ');
+  svgEl('path', { d: path, fill: 'none', stroke: 'var(--accent)', 'stroke-width': 2 }, svg);
+  svgText(svg, X0, 120, 'heute'); svgText(svg, X1, 120, `+${Math.round(maxD)} Tage (log. Skala)`, 'end');
+}
+
+// ------------------------------------------------------------------ Q: Marktphase (BTC Tageschart, 50-Tage-Schnitt)
+function btcPhases(btc) {
+  const closes = btc.map((r) => r[1]), out = [];
+  for (let i = 0; i < closes.length; i++) {
+    if (i < 59) { out.push(null); continue; }
+    const sma = (k) => closes.slice(k - 49, k + 1).reduce((s, v) => s + v, 0) / 50;
+    const m = sma(i), slope = m - sma(i - 10);
+    out.push(closes[i] > m && slope > 0 ? 'auf' : closes[i] < m && slope < 0 ? 'ab' : 'seit');
+  }
+  return out;
+}
+function drawPhase(box, market, trades) {
+  const btc = market?.btc || [];
+  if (btc.length < 70) return tooFew(box, 'BTC-Daten gerade nicht verfügbar.');
+  const ph = btcPhases(btc), name = { auf: 'Aufwärtstrend', ab: 'Abwärtstrend', seit: 'Seitwärts' }, col = { auf: '--up', ab: '--down', seit: '--muted' };
+  const cur = ph[ph.length - 1];
+  let n = 0; for (let i = ph.length - 1; i >= 0 && ph[i] === cur; i--) n++;
+  const dayPhase = {}; btc.forEach((r, i) => { dayPhase[Math.floor(r[0] / 864e5)] = ph[i]; });
+  const stat = {};
+  trades.forEach((t) => {
+    const p = dayPhase[Math.floor(t.utime / 864e5)];
+    if (!p) return;
+    const s = (stat[t.bot] = stat[t.bot] || { auf: [0, 0], ab: [0, 0], seit: [0, 0] });
+    s[p][0] += t.net; s[p][1]++;
+  });
+  const rows = Object.entries(stat).map(([b, s]) => [b, s[cur][1] ? s[cur][0] / s[cur][1] : null, s[cur][1], s]).sort((a, b) => (b[1] ?? -1e9) - (a[1] ?? -1e9));
+  const max = Math.max(...rows.map((r) => Math.abs(r[1] || 0)), 0.01);
+  const last = btc.slice(-120), lp = ph.slice(-120);
+  box.innerHTML = `<div class="nbox"><div class="row2"><span class="lbl">BTC Tageschart · Phase jetzt</span><b style="color:var(${col[cur]})">${name[cur]}</b></div>
+      <svg class="viz" viewBox="0 0 360 90" aria-hidden="true"></svg><span class="lbl">Seit ${n} Tag${n === 1 ? '' : 'en'}. Regel: Kurs über/unter dem 50-Tage-Schnitt und Schnitt steigt/fällt, sonst seitwärts.</span></div>
+    <span class="lbl">Deine Trades der letzten 90 Tage, die in einer Phase „${name[cur]}“ geschlossen wurden: Ø Ergebnis je Trade</span>
+    <div class="rank">${rows.map(([b, v, cnt, s]) => `<div class="crow" style="grid-template-columns:64px minmax(0,1fr) 64px 54px">
+      <b style="color:${botColor(b)}">${esc(b)}</b><div class="cbar"><i style="${(v || 0) >= 0 ? `left:50%;width:${Math.abs(v || 0) / max * 50}%` : `right:50%;width:${Math.abs(v) / max * 50}%`};background:var(${(v || 0) >= 0 ? '--up' : '--down'})"></i></div>
+      <span class="mono ${cls(v)}">${v == null ? '—' : signed(v)}</span><small>${cnt} Tr.</small></div>`).join('')}</div>
+    <div class="lbl">Wenige Trades je Phase sind Zufall. Erst ab etwa 30 Trades sagt die Zahl etwas.</div>`;
+  const svg = box.querySelector('svg'), closes = last.map((r) => r[1]), lo = Math.min(...closes), hi = Math.max(...closes);
+  const x = (i) => 2 + i / (last.length - 1) * 356, y = (v) => 6 + (1 - (v - lo) / (hi - lo)) * 78;
+  lp.forEach((p, i) => { if (p) svgEl('rect', { x: x(i) - 1.5, y: 0, width: 356 / last.length + 0.5, height: 90, fill: `var(${col[p]})`, 'fill-opacity': p === 'seit' ? 0.04 : 0.09 }, svg); });
+  const all = btc.map((r) => r[1]), off = btc.length - last.length;
+  const sma = last.map((_, i) => { const k = off + i; return k < 49 ? null : all.slice(k - 49, k + 1).reduce((s, v) => s + v, 0) / 50; });
+  svgEl('path', { d: sma.map((v, i) => (v == null ? '' : `${i && sma[i - 1] != null ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`)).join(' '), fill: 'none', stroke: 'var(--muted)', 'stroke-dasharray': '3 3' }, svg);
+  svgEl('path', { d: closes.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' '), fill: 'none', stroke: 'var(--btc)', 'stroke-width': 1.6 }, svg);
+}
+
+// ------------------------------------------------------------------ S: Bot-Zeugnis
+const gradeOpen = new Set();
+function drawGrades(box, bots, trades, race, reports) {
+  const now = Date.now(), since = now - 30 * 864e5;
+  const items = bots.filter((b) => b.has_key).map((b) => {
+    const rep = reports.find((r) => r.bot === b.name) || {};
+    const t30 = trades.filter((t) => t.bot === b.name && t.utime >= since);
+    const net = t30.reduce((s, t) => s + t.net, 0), gross = t30.reduce((s, t) => s + (t.pnl || 0), 0), fees = t30.reduce((s, t) => s + (t.fees || 0), 0);
+    const ser = (race?.bots || []).find((r) => r.name === b.name)?.v.filter((v) => v != null) || [];
+    const peak = Math.max(...ser, 0), dd = ser.length && peak > 0 ? (ser[ser.length - 1] / peak - 1) * 100 : 0;
+    const pct = b.equity ? net / b.equity * 100 : 0;
+    const stale = rep.ts && (now / 1000 - rep.ts) > 36 * 3600;
+    const alerts = state.alerts.filter((a) => a.bot === b.name && a.title !== 'Bot läuft nicht' && a.level === 'crit').length
+      + state.alerts.filter((a) => a.bot === b.name && a.title === 'Order ohne Position').length;
+    const c = [
+      ['läuft', b.running ? 20 : 0, b.running ? 'läuft' : 'steht', b.running ? 'Der Bot läuft im erwarteten Takt.' : 'Der Bot hat zu lange nichts ins Log geschrieben.'],
+      ['Live = BT', !rep.status || stale ? 10 : { green: 20, yellow: 12, red: 0 }[rep.status], !rep.status ? 'kein Bericht' : stale ? 'Bericht alt' : { green: 'Live = BT', yellow: 'Live ≈ BT', red: 'Live ≠ BT' }[rep.status],
+        !rep.status || stale ? 'Kein aktueller Live-gegen-Backtest-Bericht (zählt halb).' : { green: 'Live macht genau, was der Backtest sagt.', yellow: 'Einstiege gleich, aber Ausstieg weicht ab oder es gibt Hinweise.', red: 'Live fehlen Trades oder es gibt Trades ohne Backtest-Signal.' }[rep.status]],
+      ['Gewinn', pct >= 5 ? 20 : pct >= 0 ? 14 : pct >= -5 ? 7 : 0, `${signed(pct, 0)} % 30 T`, `In 30 Tagen ${signed(net)} USDT (${signed(pct, 1)} % vom Konto).`],
+      ['Rückgang', dd >= -10 ? 20 : dd >= -20 ? 12 : dd >= -30 ? 6 : 0, `Rückgang ${nf(-dd, 0)} %`, `Liegt ${nf(-dd, 1)} % unter seinem Höchststand der letzten 90 Tage.`],
+      ['Gebühren', gross > 0 ? (-fees / gross < 0.25 ? 20 : -fees / gross < 0.5 ? 12 : 4) : 2, gross > 0 ? `Gebühren ${nf(-fees / gross * 100, 0)} %` : 'Kurs negativ',
+        gross > 0 ? `Gebühren fressen ${nf(-fees / gross * 100, 0)} % vom Kursgewinn (30 Tage).` : `Schon vor Gebühren im Minus (${signed(gross)}), Gebühren ${signed(fees)}.`],
+    ];
+    const pen = Math.min(20, alerts * 10), pts = Math.max(0, c.reduce((s, x) => s + x[1], 0) - pen);
+    const grade = pts >= 85 ? 'A' : pts >= 70 ? 'B' : pts >= 50 ? 'C' : pts >= 30 ? 'D' : 'E';
+    return { b, c, pts, grade, pen, alerts };
+  }).sort((a, b) => b.pts - a.pts);
+  if (!items.length) return tooFew(box, 'Keine Bots mit Schlüssel.');
+  const gcol = { A: '--up', B: '--up', C: '--warn', D: '--down', E: '--down' };
+  box.innerHTML = items.map(({ b, c, pts, grade, pen, alerts }) => {
+    const open = gradeOpen.has(b.name);
+    const chip = (x) => `<span class="${x[1] >= 16 ? 'ok' : x[1] >= 8 ? 'mid' : 'bad'}">${esc(x[2])}</span>`;
+    return `<div class="grade" role="button" tabindex="0" data-bot="${esc(b.name)}" aria-expanded="${open}">
+      <span class="gl" style="color:var(${gcol[grade]});background:color-mix(in srgb, var(${gcol[grade]}) 16%, transparent)">${grade}</span>
+      <div><b style="color:${botColor(b.name)}">${esc(b.name)}</b><div class="lbl mono">${pts} / 100</div></div>
+      <div class="gchips">${c.map(chip).join('')}${pen ? `<span class="bad">${alerts} Alarm${alerts > 1 ? 'e' : ''}</span>` : ''}</div><span class="muted">${open ? '▾' : '›'}</span>
+      ${open ? `<div class="gdet">${c.map((x) => `<div><b class="mono">${x[1]}/20</b> ${esc(x[0])}: ${esc(x[3])}</div>`).join('')}${pen ? `<div><b class="mono">−${pen}</b> Abzug für ${alerts} offene Alarme (z. B. Position ohne SL, Order ohne Position).</div>` : ''}</div>` : ''}</div>`;
+  }).join('') + '<div class="lbl">Je Kriterium bis 20 Punkte. A ab 85, B ab 70, C ab 50, D ab 30.</div>';
+  box.querySelectorAll('.grade').forEach((g) => {
+    const t = () => { const n = g.dataset.bot; gradeOpen.has(n) ? gradeOpen.delete(n) : gradeOpen.add(n); drawGrades(box, bots, trades, race, reports); };
+    g.addEventListener('click', t);
+    g.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); t(); } });
+  });
+}
+
+// ------------------------------------------------------------------ U: Gebühren-Spiegel (30 Tage)
+function drawFees(box, trades) {
+  const since = Date.now() - 30 * 864e5, by = {};
+  trades.filter((t) => t.utime >= since).forEach((t) => {
+    const r = (by[t.bot] = by[t.bot] || { fees: 0, turn: 0, gross: 0, n: 0 });
+    r.fees += -(t.fees || 0); r.gross += t.pnl || 0; r.n++;
+    r.turn += (t.size || 0) * ((t.open || 0) + (t.close || 0));
+  });
+  const rows = Object.entries(by).sort((a, b) => b[1].fees - a[1].fees);
+  if (!rows.length) return tooFew(box, 'In 30 Tagen keine Trades.');
+  const MAKER = 0.0002, TAKER = 0.0006;
+  rows.forEach(([, r]) => {
+    const rate = r.turn ? r.fees / r.turn : TAKER;
+    r.taker = Math.max(0, Math.min(1, (rate - MAKER) / (TAKER - MAKER)));
+    r.save = Math.max(0, r.fees - MAKER * r.turn);
+  });
+  const tot = rows.reduce((s, [, r]) => s + r.fees, 0), save = rows.reduce((s, [, r]) => s + r.save, 0), max = Math.max(...rows.map(([, r]) => r.fees), 0.01);
+  box.innerHTML = `<div class="nbox"><div class="row2"><span class="lbl">Gebühren letzte 30 Tage</span><b class="mono down">${signed(-tot)} USDT</b></div>
+      <div class="row2"><span class="lbl">Möglich mit nur Limit-Orders</span><b class="mono up">${nf(save)} USDT gespart</b></div></div>
+    <div class="rank"><div class="crow fhead" style="grid-template-columns:64px minmax(0,1fr) 62px 62px"><span>Bot</span><span>Gebühren · Taker-Anteil dunkel</span><span>Kurs</span><span>sparbar</span></div>
+    ${rows.map(([b, r]) => `<div class="crow" style="grid-template-columns:64px minmax(0,1fr) 62px 62px">
+      <b style="color:${botColor(b)}">${esc(b)}</b>
+      <div class="cbar fee"><i style="left:0;width:${r.fees / max * 100}%;background:var(--down);opacity:.4"></i><i style="left:0;width:${r.fees * r.taker / max * 100}%;background:var(--down)"></i></div>
+      <span class="mono ${cls(r.gross)}">${signed(r.gross, 1)}</span><span class="mono up">${nf(r.save)}</span></div>`).join('')}</div>
+    <div class="lbl">Rot = Gebühren in USDT (${rows.map(([b, r]) => `${esc(b)} ${nf(r.fees)}`).join(' · ')}). „Kurs“ = Kursgewinn vor Gebühren. Taker-Anteil geschätzt aus der Gebührenhöhe je Umsatz (Standard: Taker 0,06 %, Maker 0,02 %).</div>`;
 }

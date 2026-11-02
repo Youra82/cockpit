@@ -776,6 +776,13 @@ class App:
             self.key = f.read().strip().encode()
         self.token = hmac.new(self.key, str(cfg['password']).encode(), hashlib.sha256).hexdigest()
         self.public, self.candle_cache = None, {}
+        self.market_cache, self.market_lock = {}, threading.Lock()
+        sk = os.path.join(DATA, 'siri_key')
+        if not os.path.isfile(sk):
+            with open(sk, 'w') as f:
+                f.write(secrets.token_urlsafe(18))
+        with open(sk) as f:
+            self.siri_key = f.read().strip()
 
     def fps_for(self, bot):
         if bot in (None, '', 'all'):
@@ -853,12 +860,7 @@ class App:
         limit = min(200, int((end_ms + pad - since) / (sec * 1000)) + 1)
         key = (symbol, tf, since, limit)
         if key not in self.candle_cache:
-            if self.public is None:
-                self.public = ccxt.bitget({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
-                src = self.poller.markets_client
-                if src is not None and src.markets:
-                    self.public.set_markets(src.markets, src.currencies)
-            rows = self.public.fetch_ohlcv(symbol, tf, since, limit)
+            rows = self.public_client().fetch_ohlcv(symbol, tf, since, limit)
             if len(self.candle_cache) > 40:
                 self.candle_cache.clear()
             self.candle_cache[key] = {'tf': tf, 'c': [[int(r[0]), r[1], r[2], r[3], r[4]] for r in rows]}
@@ -905,7 +907,91 @@ class App:
             name_of.setdefault(b['fp'], b['name'])
         rows = self.store.closes(fps, int((time.time() - 89 * 86400) * 1000))
         return [{'bot': name_of.get(r['fp']), 'sym': r['symbol'], 'side': r['side'], 'net': r['net'], 'pnl': r['pnl'],
-                 'fees': r['fees'], 'funding': r['funding'], 'ctime': r['ctime'], 'utime': r['utime']} for r in rows]
+                 'fees': r['fees'], 'funding': r['funding'], 'ctime': r['ctime'], 'utime': r['utime'],
+                 'size': r['size'], 'open': r['open_price'], 'close': r['close_price']} for r in rows]
+
+    def public_client(self):
+        if self.public is None:
+            self.public = ccxt.bitget({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+            src = self.poller.markets_client
+            if src is not None and src.markets:
+                self.public.set_markets(src.markets, src.currencies)
+        return self.public
+
+    def market(self):
+        """Oeffentliche Marktdaten (kein API-Schluessel): BTC-Tageskurse, Beta der offenen Coins zu BTC (30 Tage),
+        Funding-Raten. Hoechstens einmal pro Stunde neu (Funding alle 10 Minuten)."""
+        now = time.time()
+        with self.market_lock:
+            m = self.market_cache
+            syms = sorted({p['symbol'] for b in self.poller.snapshot()['bots'] for p in b['positions']})
+            ex = self.public_client()
+            if now - m.get('ts', 0) > 3600 or any(sym not in m.get('beta', {}) for sym in syms):
+                # Bitget liefert je Abruf hoechstens 90 Tageskerzen -> in Stuecken ab 200 Tagen zurueck
+                btc, since, end = {}, int((now - 200 * 86400) * 1000), int(now * 1000)
+                while since < end:
+                    part = ex.fetch_ohlcv('BTC/USDT:USDT', '1d', since, 90)
+                    if not part:
+                        break
+                    btc.update({int(r[0]): r for r in part})
+                    since = int(part[-1][0]) + 86400 * 1000
+                    if len(part) < 90:
+                        break
+                btc = [btc[k] for k in sorted(btc)]
+                m['btc'] = [[int(r[0]), r[4]] for r in btc]
+                rb = {int(r[0]): r[4] for r in btc[-32:]}
+                beta = dict(m.get('beta', {})) if now - m.get('ts', 0) <= 3600 else {}
+                for sym in syms:
+                    if sym in beta:
+                        continue
+                    try:
+                        rows = {int(r[0]): r[4] for r in ex.fetch_ohlcv(sym, '1d', None, 32)}
+                        days = sorted(set(rows) & set(rb))
+                        xs = [rb[days[i]] / rb[days[i - 1]] - 1 for i in range(1, len(days))]
+                        ys = [rows[days[i]] / rows[days[i - 1]] - 1 for i in range(1, len(days))]
+                        mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+                        var = sum((x - mx) ** 2 for x in xs)
+                        beta[sym] = round(sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / var, 2) if var else 1.0
+                    except Exception as e:
+                        log.warning('Beta %s: %s', sym, str(e)[:120])
+                        beta[sym] = 1.0
+                m['beta'], m['ts'] = beta, now
+            if now - m.get('fts', 0) > 600 or any(sym not in m.get('funding', {}) for sym in syms):
+                fund = {}
+                for sym in syms:
+                    try:
+                        f = ex.fetch_funding_rate(sym)
+                        fund[sym] = {'rate': f.get('fundingRate'),
+                                     'next': f.get('fundingTimestamp') or f.get('nextFundingTimestamp')}
+                    except Exception as e:
+                        log.warning('Funding %s: %s', sym, str(e)[:120])
+                m['funding'], m['fts'] = fund, now
+            return {'btc': m.get('btc', []), 'beta': m.get('beta', {}), 'funding': m.get('funding', {})}
+
+    def summary_text(self):
+        """Kurzfassung zum Vorlesen (Siri-Kurzbefehl)."""
+        st = self.poller.snapshot()
+        counted, eq, real, opn, running = set(), 0.0, 0.0, 0.0, 0
+        for b in st['bots']:
+            running += 1 if b['running'] else 0
+            if not b['has_key'] or any(n in counted for n in b['shared_with']):
+                continue
+            counted.add(b['name'])
+            eq += b['equity'] or 0
+            real += b['pnl_today'] or 0
+            opn += b['upnl'] or 0
+        de = lambda v, d=2: f'{v:.{d}f}'.replace('.', ',')
+        sgn = lambda v: ('plus ' if v >= 0 else 'minus ') + de(abs(v))
+        crit = [a for a in st['alerts'] if a['level'] == 'crit']
+        txt = (f"Gesamtkapital {de(eq, 0)} USDT. Heute realisiert {sgn(real)}, offen {sgn(opn)}. "
+               f"{running} von {len(st['bots'])} Bots laufen. ")
+        if not st['alerts']:
+            txt += 'Keine Alarme.'
+        else:
+            first = st['alerts'][0]
+            txt += (f"{len(st['alerts'])} Alarm{'e' if len(st['alerts']) > 1 else ''}, davon {len(crit)} kritisch. "
+                    f"Zuerst: {first['bot'] + ', ' if first['bot'] else ''}{first['title']}.")
+        return txt
 
     def stats(self, bot):
         fps = self.fps_for(bot)
@@ -989,8 +1075,26 @@ def make_handler(app):
                 return self.send_static('index.html')
             if not url.path.startswith('/api/'):
                 return self.send_static(url.path.lstrip('/'))
+            if url.path == '/api/summary':
+                # Fuer den Siri-Kurzbefehl: eigener Lese-Schluessel statt Login-Cookie, gibt nur diesen Satz frei
+                if not hmac.compare_digest(q.get('key', ''), app.siri_key):
+                    return self.send_json({'error': 'Schlüssel falsch'}, 403)
+                body = app.summary_text().encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                return self.wfile.write(body)
             if not self.authed():
                 return self.send_json({'error': 'login'}, 401)
+            if url.path == '/api/siri':
+                return self.send_json({'path': f'/api/summary?key={app.siri_key}'})
+            if url.path == '/api/market':
+                try:
+                    return self.send_json(app.market())
+                except Exception as e:
+                    return self.send_json({'error': f'{type(e).__name__}: {str(e)[:120]}'}, 502)
             if url.path == '/api/state':
                 return self.send_json(app.poller.snapshot())
             if url.path == '/api/equity':

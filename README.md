@@ -13,12 +13,12 @@ Eine Web-App, die auf dem iPhone im Vollbild mit eigenem Symbol läuft, wie eine
 
 | Seite | Inhalt |
 |---|---|
-| Übersicht | Gesamtkapital, PnL heute, offener Gewinn, Bots aktiv, Positionen, Trades heute, Liste der Bots |
+| Übersicht | Gesamtkapital, realisiert heute + offen = zusammen, Kurve, Liste der Bots, **alle offenen Positionen** (Mini-Preisleiter, Abstand zum SL, Trailing-Start), **Worst Case** (alle Stops greifen / BTC-Szenario mit Beta) und **Funding-Uhr** |
 | Bot-Detail | Kontostand mit Kurve, offene Positionen mit **Preisleiter** (SL, Einstieg, Kurs, TP, Liquidation auf einer Achse), wartende Orders, letzte Trades, Gewinn und Verlust je Coin, Git-Version |
-| Auswertung | Ziel (in der App änderbar), **Monatsrückblick** zum Wischen, **Live gegen Backtest** (Ampel aus dem täglichen Check jedes Bots), Rückgang vom Höchststand, Bot-Rennen (alle starten bei 100), Kalender mit Gewinn pro Tag, Wasserfall Kursgewinn → Gebühren → Funding → Netto, jeder Trade als Punkt (Haltedauer × Ergebnis), Heatmap Wochentag × Uhrzeit, offene Positionen je Coin mit Long/Short, Gewinn je Coin und Bot, letzte Trades. Alle Grafiken antippbar |
+| Auswertung | Ziel (in der App änderbar), **Monatsrückblick** zum Wischen, **Bot-Zeugnis** (Note A–E je Bot), **Bots gegen BTC halten**, **Ziel-Prognose**, **Gebühren-Spiegel**, **Marktphase** (BTC über/unter 50-Tage-Schnitt und wie deine Bots darin abschneiden), **Live gegen Backtest** (Ampel aus dem täglichen Check jedes Bots), Rückgang vom Höchststand, Bot-Rennen (alle starten bei 100), Kalender mit Gewinn pro Tag, Wasserfall Kursgewinn → Gebühren → Funding → Netto, jeder Trade als Punkt (Haltedauer × Ergebnis), Heatmap Wochentag × Uhrzeit, offene Positionen je Coin mit Long/Short, Gewinn je Coin und Bot, letzte Trades. Alle Grafiken antippbar |
 | Trade | Jeder Trade in den Listen ist antippbar: Kerzenchart mit Einstieg und Ausstieg, Ergebnis, Gebühren, Funding |
 | Alarme | Bot läuft nicht, Position ohne Stop-Loss, Liquidation vor Stop-Loss, gleicher Coin in mehreren Bots (Klumpenrisiko), Bitget-Abfrage fehlgeschlagen. Darunter **Mitteilungen** (an/aus je Art) und die **Zeitleiste** der letzten 7 Tage: eröffnet, geschlossen, Stop verschoben, Ein-/Auszahlung, Alarm |
-| Server | Prozessor, RAM, Speicher, Laufzeit, Version und letzter Lauf jedes Bots |
+| Server | Prozessor, RAM, Speicher, Laufzeit, Version und letzter Lauf jedes Bots. **Siri**: Adresse für einen Kurzbefehl „Wie stehen meine Bots?“ (eigener Lese-Schlüssel, gibt nur diesen einen Satz frei) |
 
 <table>
 <tr>

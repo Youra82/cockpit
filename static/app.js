@@ -190,7 +190,11 @@ function viewHome() {
       ${icon.chev}</a>`;
   }).join('')}
   <h2>Alle offenen Positionen <small>${t.positions} in ${state.bots.filter((b) => b.positions.length).length} Bots · antippen</small></h2>
-  <div class="card" id="allpos"></div>`;
+  <div class="card" id="allpos"></div>
+  <h2>Worst Case <small>alle Stops / BTC-Szenario</small></h2>
+  <div class="card" id="worst"><div class="empty">lädt …</div></div>
+  <h2>Funding-Uhr <small>nächste Zahlung</small></h2>
+  <div class="card" id="funding"><div class="empty">lädt …</div></div>`;
 }
 
 // Positionen aller Bots, gemeinsam genutzte Konten nur einmal
@@ -397,15 +401,20 @@ function statsBody(s) {
   const viz = (id, title, sub, q) => `<h2>${title} <small>${sub}</small></h2>
   <div class="card"><p class="q">${q}</p><div id="${id}"><div class="empty">lädt …</div></div></div>`;
   return `<h2>Monatsrückblick <small>zum Wischen</small></h2><div class="card"><div id="vizM"><div class="empty">lädt …</div></div></div>
+  ${viz('vizS', 'Bot-Zeugnis', 'Note je Bot', 'Welcher Bot läuft gut, welcher braucht Aufmerksamkeit? Zeile antippen zeigt die Begründung.')}
   ${viz('vizL', 'Live gegen Backtest', 'täglicher Check der Bots', 'Macht jeder Bot live, was sein Backtest erwartet? Zeile antippen zeigt den Grund.')}
   ${viz('vizA', 'Rückgang vom Höchststand', '90 Tage', 'Wie tief liege ich unter meinem besten Stand, und wie lange hat die Erholung gedauert?')}
   ${viz('vizB', 'Bot-Rennen', 'Start = 100', 'Welcher Bot entwickelt sich am besten, egal wie viel Geld auf seinem Konto liegt?')}
+  ${viz('vizO', 'Bots gegen BTC halten', 'beide ab 100', 'Hätten die Bots mehr gebracht, als das Geld einfach in BTC zu stecken? Finger über die Kurve.')}
+  ${viz('vizP', 'Ziel-Prognose', 'bei gleichem Tempo', 'Wann wäre das Ziel erreicht, wenn es so weitergeht wie zuletzt?')}
   <h2>${now.toLocaleDateString('de-DE', { month: 'long', year: 'numeric' })} <small>Gewinn pro Tag (USDT)</small></h2>
   <div class="card"><div class="cal">${cells}</div></div>
   ${viz('vizC', 'Wohin das Geld geht', 'Zeitraum wählbar', 'Was bringen die Trades, und was fressen Gebühren und Funding wieder auf?')}
+  ${viz('vizU', 'Gebühren-Spiegel', '30 Tage', 'Wie viel zahlt jeder Bot an Gebühren, und wie viel wäre mit Limit-Orders sparbar?')}
   ${viz('vizD', 'Jeder Trade ein Punkt', '90 Tage', 'Verlieren lange Trades öfter? Tragen wenige Ausreißer das Ergebnis? Punkt antippen.')}
   ${viz('vizE', 'Wann verdienen die Bots?', '90 Tage', 'Summe der Trades je Wochentag und Stunde, in der sie geschlossen wurden. Feld antippen.')}
   ${viz('vizF', 'Wo mein Geld gerade steckt', 'offene Positionen', 'Positionsgröße je Coin über alle Bots, dazu Long gegen Short. Segment antippen.')}
+  ${viz('vizQ', 'Marktphase jetzt', 'BTC Tageschart', 'In welcher Phase ist der Markt, und wie schneiden deine Bots in genau dieser Phase ab?')}
   ${viz('vizK', 'Welche Coins bringen Geld?', '90 Tage', 'Gewinn und Verlust je Coin, für jeden Bot einzeln.')}
   <h2>Letzte Trades <small>${tt.count || 0} in 90 Tagen · antippen für Chart</small></h2>
   <div class="card tight">${tradeRows(s.trades, true)}</div>`;
@@ -436,7 +445,33 @@ function viewServer() {
       <span class="mono">${b.git ? esc(b.git.hash) + ' · ' + new Date(b.git.date).toLocaleDateString('de-DE') : 'keine Git-Version'}</span>
       <span>letzter Lauf ${ago(b.last_activity)}</span>
       <span>alle ${b.cycle} min</span></div></div>`).join('')}</div>
-  <div class="lbl" style="text-align:center">Bitget wird alle ${state.poll_seconds} s abgefragt – nur lesend.</div>`;
+  <div class="lbl" style="text-align:center">Bitget wird alle ${state.poll_seconds} s abgefragt – nur lesend.</div>
+  <h2>Siri <small>„Wie stehen meine Bots?“</small></h2>
+  <div class="card" id="siribox"><div class="empty">lädt …</div></div>`;
+}
+
+// Siri-Kurzbefehl: Adresse mit eigenem Lese-Schluessel, Schritte zum Einrichten, Probe
+async function siriPanel(box) {
+  const url = location.origin + (await api('/api/siri')).path;
+  box.innerHTML = `<div class="q">Mit der iOS-App <b>Kurzbefehle</b> liest Siri dir den Stand vor, ohne die App zu öffnen. So richtest du es einmal ein:</div>
+    <ol class="steps">
+      <li>Adresse kopieren: <button class="linkbtn" id="sicopy" type="button">Kopieren</button></li>
+      <li>App <b>Kurzbefehle</b> → <b>+</b> → Aktion <b>„Inhalte von URL abrufen“</b> → die Adresse einfügen.</li>
+      <li>Aktion <b>„Text sprechen“</b> darunter hinzufügen.</li>
+      <li>Oben den Namen <b>„Wie stehen meine Bots“</b> eingeben, fertig. Dann: „Hey Siri, wie stehen meine Bots?“</li>
+    </ol>
+    <div class="mono siurl" id="siurl">${esc(url)}</div>
+    <button class="btn ghost" id="sitest" type="button">Probe: so würde Siri antworten</button><div class="lbl" id="siout"></div>
+    <div class="lbl">Die Adresse enthält einen eigenen Schlüssel. Er gibt nur diesen einen Satz frei, keine anderen Daten. Funktioniert nur, wenn Tailscale auf dem iPhone an ist.</div>`;
+  box.querySelector('#sicopy').addEventListener('click', async (ev) => {
+    try { await navigator.clipboard.writeText(url); ev.target.textContent = 'Kopiert'; } catch (e) {
+      const r = document.createRange(); r.selectNodeContents(box.querySelector('#siurl')); getSelection().removeAllRanges(); getSelection().addRange(r);
+      ev.target.textContent = 'Markiert – jetzt kopieren';
+    }
+  });
+  box.querySelector('#sitest').addEventListener('click', async () => {
+    box.querySelector('#siout').textContent = await (await fetch(url)).text();
+  });
 }
 
 // ------------------------------------------------------------------ Steuerung
@@ -470,8 +505,10 @@ async function render() {
   if (bp) { const bb = state.bots.find((x) => x.name === r.arg); drawPositions(bp, bb.positions.map((p) => ({ ...p, bot: bb.name })), false); }
   try {
     if (r.name === 'home') {
-      const pts = await eq('all');
+      const [pts, market] = await Promise.all([eq('all'), api('/api/market').catch(() => null)]);
       const el = document.getElementById('homechart'); if (el) { el.innerHTML = chartWithSummary(pts); bindScrub(el, pts); }
+      const w = document.getElementById('worst'); if (w) drawWorst(w, allPositions(), market, totals(state.bots).equity);
+      const f = document.getElementById('funding'); if (f) drawFunding(f, allPositions(), market);
     } else if (r.name === 'bot') {
       const [pts, st, trades] = await Promise.all([eq(r.arg), api(`/api/stats?bot=${encodeURIComponent(r.arg)}`), api('/api/trades')]);
       const c = document.getElementById('botchart'); if (c) { c.innerHTML = chartWithSummary(pts); bindScrub(c, pts); }
@@ -484,6 +521,8 @@ async function render() {
         const cd = await api(`/api/candles?symbol=${encodeURIComponent(t.symbol)}&from=${t.ctime}&to=${t.utime}`);
         if (box) drawTradeChart(box, t, cd);
       } catch (e) { if (box) box.innerHTML = `<div class="empty">Kerzen konnten nicht geladen werden (${esc(e.message)}).</div>`; }
+    } else if (r.name === 'server') {
+      const sb = document.getElementById('siribox'); if (sb) await siriPanel(sb);
     } else if (r.name === 'alarme') {
       const tl = document.getElementById('timeline');
       const pb = document.getElementById('pushbox');
@@ -491,8 +530,8 @@ async function render() {
       const ev = await api('/api/events');
       if (tl) drawTimeline(tl, ev);
     } else if (r.name === 'auswertung') {
-      const [st, trades, race, dd, reports] = await Promise.all([api('/api/stats?bot=all'), api('/api/trades'),
-        api('/api/race?range=Alles'), api('/api/equity?bot=all&range=Alles&mode=gewinn'), api('/api/reports')]);
+      const [st, trades, race, dd, reports, market] = await Promise.all([api('/api/stats?bot=all'), api('/api/trades'),
+        api('/api/race?range=Alles'), api('/api/equity?bot=all&range=Alles&mode=gewinn'), api('/api/reports'), api('/api/market').catch(() => null)]);
       const el = document.getElementById('statsbody');
       if (el) {
         el.innerHTML = statsBody(st);
@@ -500,6 +539,8 @@ async function render() {
         drawDrawdown(box('vizA'), dd); drawRace(box('vizB'), race); drawCosts(box('vizC'), trades);
         drawScatter(box('vizD'), trades); drawHeatmap(box('vizE'), trades); drawExposure(box('vizF'), state.bots);
         drawRecap(box('vizM'), trades, dd); drawReports(box('vizL'), reports); drawCoins(box('vizK'), trades);
+        drawGrades(box('vizS'), state.bots, trades, race, reports); drawVsBtc(box('vizO'), dd, market);
+        drawForecast(box('vizP'), dd, state.goal); drawFees(box('vizU'), trades); drawPhase(box('vizQ'), market, trades);
       }
     }
   } catch (e) { /* Login-Wechsel oder Netzwerk: naechster Refresh versucht es erneut */ }
