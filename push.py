@@ -27,6 +27,7 @@ CATEGORIES = {
     'no_sl': 'Position ohne Stop-Loss',
     'liq': 'Liquidation und Liquidationsgefahr',
     'cluster': 'Klumpenrisiko',
+    'orphan': 'Order ohne Position',
     'error': 'Bitget-Abfrage fehlgeschlagen',
     'big_trade': 'Große Trades',
     'daily': 'Tagesabschluss',

@@ -250,3 +250,4 @@ details.ampel .det a { color: var(--accent); }
 .pdist.r { color: var(--down); background: var(--down-bg); } .pdist.y { color: var(--warn); background: var(--warn-bg); } .pdist.g { color: var(--muted); background: var(--soft); }
 .pdet { grid-column: 1 / -1; display: grid; gap: 8px; padding-top: 6px; cursor: default; }
 .pgo { color: var(--accent); font-size: 13px; }
+.ladtxt .tnote { display: block; padding-left: 14px; color: var(--dim); }

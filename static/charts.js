@@ -568,7 +568,7 @@ function drawPositions(box, rows, withBot) {
     <div class="pls"><div class="bar"><i style="flex:${longs};background:var(--up)"></i><i style="flex:${rows.length - longs};background:var(--down)"></i></div>
       <div><span>${longs} Long</span><span>${rows.length - longs} Short</span></div></div>
     <div class="seg wrap" role="group" aria-label="Sortierung"></div><div class="plist"></div>
-    <div class="lbl">Balken: SL (rot), Einstieg (grau), Kurs (●), TP (grün). Rechts der Abstand zum Stop-Loss: rot unter 2 %, gelb unter 5 %.</div>`;
+    <div class="lbl">Balken: SL (rot), Einstieg (grau), Kurs (●), TP (grün). Gestrichelt grün mit Pfeil: ab hier Trailing-Stop, kein festes Ziel. Rechts der Abstand zum Stop-Loss: rot unter 2 %, gelb unter 5 %.</div>`;
   const seg = box.querySelector('.seg');
   Object.entries(sorts).forEach(([k, [l]]) => {
     const bt = document.createElement('button');
@@ -577,12 +577,23 @@ function drawPositions(box, rows, withBot) {
     seg.appendChild(bt);
   });
   const mini = (p) => {
-    const vals = [p.sl, p.tp, p.entry, p.mark].filter((v) => v), lo = Math.min(...vals), hi = Math.max(...vals);
+    // Ohne festes TP, aber mit Trailing-Stop: Start markieren und Platz fuer das offene Ende lassen
+    const trail = !p.tp && p.trail ? p.trail : null;
+    const vals = [p.sl, p.tp, p.entry, p.mark, trail].filter((v) => v);
+    let lo = Math.min(...vals), hi = Math.max(...vals);
+    const up = trail && trail > p.entry;
+    if (trail) { const ext = (hi - lo) * 0.22; if (up) hi += ext; else lo -= ext; }
     const x = (v) => (hi > lo ? 4 + (v - lo) / (hi - lo) * 192 : 100).toFixed(1);
-    const zone = (a, b, c) => (a && b ? `<rect x="${Math.min(x(a), x(b))}" y="8" width="${Math.abs(x(a) - x(b)).toFixed(1)}" height="6" rx="2" fill="${c}" fill-opacity=".3"/>` : '');
-    const tick = (v, c, h) => (v ? `<line x1="${x(v)}" x2="${x(v)}" y1="${11 - h}" y2="${11 + h}" stroke="${c}" stroke-width="2"/>` : '');
+    const zone = (a, b, c, o = 0.3) => (a && b ? `<rect x="${Math.min(x(a), x(b))}" y="8" width="${Math.abs(x(a) - x(b)).toFixed(1)}" height="6" rx="2" fill="${c}" fill-opacity="${o}"/>` : '');
+    const tick = (v, c, h, dash) => (v ? `<line x1="${x(v)}" x2="${x(v)}" y1="${11 - h}" y2="${11 + h}" stroke="${c}" stroke-width="2"${dash ? ' stroke-dasharray="2 2"' : ''}/>` : '');
+    const tail = trail ? (() => {
+      const a = Number(x(trail)), e = up ? 194 : 6;
+      return `<line x1="${a}" x2="${e}" y1="11" y2="11" stroke="var(--up)" stroke-width="2" stroke-dasharray="3 3" stroke-opacity=".8"/>
+        <path d="M${e} 11 l${up ? -6 : 6} -5 v10 z" fill="var(--up)" fill-opacity=".8"/>`;
+    })() : '';
     return `<svg viewBox="0 0 200 22" preserveAspectRatio="none" aria-hidden="true"><line x1="4" x2="196" y1="11" y2="11" stroke="var(--line)" stroke-width="2"/>
-      ${zone(p.sl, p.entry, 'var(--down)')}${zone(p.entry, p.tp, 'var(--up)')}${tick(p.sl, 'var(--down)', 8)}${tick(p.tp, 'var(--up)', 8)}${tick(p.entry, 'var(--muted)', 6)}
+      ${zone(p.sl, p.entry, 'var(--down)')}${zone(p.entry, p.tp, 'var(--up)')}${trail ? zone(p.entry, trail, 'var(--up)', 0.18) : ''}${tail}
+      ${tick(p.sl, 'var(--down)', 8)}${tick(p.tp, 'var(--up)', 8)}${tick(trail, 'var(--up)', 8, true)}${tick(p.entry, 'var(--muted)', 6)}
       <circle cx="${x(p.mark)}" cy="11" r="4.5" fill="var(--text)" stroke="var(--card)" stroke-width="2"/></svg>`;
   };
   const list = box.querySelector('.plist');
@@ -598,7 +609,7 @@ function drawPositions(box, rows, withBot) {
       <div class="ppnl mono ${cls(p.upnl)}">${signed(p.upnl)}</div>
       <div class="pmini">${mini(p)}<span class="pdist ${dc}">${d == null ? 'kein SL' : `SL ${nf(d, 1)} %`}</span></div>
       ${open ? `<div class="pdet"><div class="grid4"><span>Einstieg<b>${price(p.entry)}</b></span><span>Aktuell<b>${price(p.mark)}</b></span>
-          <span>SL<b class="${p.sl ? 'down' : 'warn'}">${p.sl ? price(p.sl) : 'FEHLT'}</b></span><span>TP<b class="${p.tp ? 'up' : 'muted'}">${p.tp ? price(p.tp) : '—'}</b></span></div>
+          <span>SL<b class="${p.sl ? 'down' : 'warn'}">${p.sl ? price(p.sl) : 'FEHLT'}</b></span><span>${!p.tp && p.trail ? 'Trailing ab' : 'TP'}<b class="${p.tp || p.trail ? 'up' : 'muted'}">${p.tp ? price(p.tp) : p.trail ? price(p.trail) : '—'}</b></span></div>
         ${ladder(p, slFirst, liqCol)}
         <div class="lbl">Größe ${nf(p.notional || 0)} USDT · Margin ${nf(p.margin || 0)} USDT${p.opened ? ` · offen seit ${timeStr(p.opened)}` : ''}</div>
         ${withBot ? `<a class="pgo" href="#/bot/${encodeURIComponent(p.bot)}">zur ${esc(p.bot)}-Seite ›</a>` : ''}</div>` : ''}`;

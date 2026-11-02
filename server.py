@@ -376,7 +376,7 @@ def norm_position(p):
         'entry': fnum(p.get('entryPrice')), 'mark': mark, 'upnl': fnum(p.get('unrealizedPnl'), 0.0),
         'leverage': fnum(p.get('leverage')), 'liq': liq, 'liq_pct': liq_pct,
         'notional': abs(fnum(p.get('notional'), 0.0) or 0.0), 'margin': fnum(p.get('initialMargin')),
-        'opened': p.get('timestamp'), 'sl': None, 'tp': None,
+        'opened': p.get('timestamp'), 'sl': None, 'tp': None, 'trail': None, 'trail_cb': None,
     }
 
 
@@ -392,6 +392,8 @@ def norm_order(o, kind):
         'sl_preset': fnum(info.get('presetStopLossPrice')) or fnum(info.get('stopLossTriggerPrice')),
         'tp_preset': fnum(info.get('presetStopSurplusPrice')) or fnum(info.get('stopSurplusTriggerPrice')),
         'created': o.get('timestamp'),
+        'pos_side': info.get('posSide'),
+        'callback': fnum(info.get('callbackRatio')),
     }
 
 
@@ -402,7 +404,13 @@ def attach_protection(positions, orders):
             if o['symbol'] != p['symbol']:
                 continue
             plan = (o['plan'] or '').lower()
-            if plan in ('pos_loss', 'loss_plan', 'moving_plan', 'track_plan'):
+            if plan == 'track_plan':
+                # Trailing-Stop mit Aktivierungspreis (z. B. dnabot): kein SL, sondern "ab hier laeuft der Stop mit"
+                if o['pos_side'] in (None, 'net', p['side']) and o['trigger']:
+                    p['trail'] = p.get('trail') or o['trigger']
+                    p['trail_cb'] = o['callback']
+                continue
+            if plan in ('pos_loss', 'loss_plan', 'moving_plan'):
                 p['sl'] = p['sl'] or o['trigger']
             elif plan in ('pos_profit', 'profit_plan'):
                 p['tp'] = p['tp'] or o['trigger']
@@ -492,8 +500,8 @@ class Poller(threading.Thread):
                      if fnum(p.get('contracts'), 0) > 0]
         orders = [norm_order(o, 'limit') for o in
                   ex.fetch_open_orders(None, params={'type': 'swap', 'productType': PRODUCT})]
-        for plan in ('normal_plan', 'profit_loss'):
-            orders += [norm_order(o, 'trigger' if plan == 'normal_plan' else 'tpsl') for o in
+        for plan in ('normal_plan', 'profit_loss', 'track_plan'):
+            orders += [norm_order(o, {'normal_plan': 'trigger', 'profit_loss': 'tpsl', 'track_plan': 'trail'}[plan]) for o in
                        ex.fetch_open_orders(None, params={'type': 'swap', 'productType': PRODUCT,
                                                           'stop': True, 'planType': plan})]
         attach_protection(positions, orders)
@@ -552,7 +560,8 @@ class Poller(threading.Thread):
         def cat(a):
             t = a['title']
             return ('bot_down' if t == 'Bot läuft nicht' else 'no_sl' if t == 'Position ohne Stop-Loss'
-                    else 'cluster' if t.startswith('Klumpenrisiko') else 'error' if t.startswith('Bitget') else 'liq')
+                    else 'cluster' if t.startswith('Klumpenrisiko') else 'error' if t.startswith('Bitget')
+                    else 'orphan' if t == 'Order ohne Position' else 'liq')
         keys = {f"{a['bot']}|{a['title']}|{a['text'].split(' · ')[0]}": a for a in alerts}
         if self.reported_alerts is None:
             # Bereits gemeldete Alarme ueberleben Neustarts (update.sh), sonst kaeme jeder Dauer-Alarm erneut
@@ -687,6 +696,26 @@ class Poller(threading.Thread):
                         alerts.append({'level': lvl, 'bot': b['name'], 'title': 'Nahe an der Liquidation',
                                        'text': f'{coin} {p["side"]} · nur {p["liq_pct"]:.1f} % Abstand, kein SL',
                                        'ts': now})
+
+        # Verwaiste Schliess-Orders: SL/TP/Trailing fuer eine Position, die es nicht mehr gibt
+        seen_fp = set()
+        for b, item in zip(self.bots, bots):
+            if not b['fp'] or b['fp'] in seen_fp:
+                continue
+            seen_fp.add(b['fp'])
+            open_pos = {(p['symbol'], p['side']) for p in item['positions']}
+            open_sym = {p['symbol'] for p in item['positions']}
+            for o in item['orders']:
+                if not o['reduce'] or o['kind'] == 'tpsl':
+                    continue
+                ps = o['pos_side'] if o['pos_side'] in ('long', 'short') else None  # Einweg-Modus: keine Seite
+                if (ps and (o['symbol'], ps) in open_pos) or (not ps and o['symbol'] in open_sym):
+                    continue
+                kind = {'trail': 'Trailing-Stop', 'trigger': 'Trigger-Order'}.get(o['kind'], 'Limit-Order')
+                lvl = o['trigger'] or o['price']
+                alerts.append({'level': 'warn', 'bot': b['name'], 'title': 'Order ohne Position',
+                               'text': f"{coin_of(o['symbol'])} {ps or ''} · {kind} · würde bei {lvl:g} auslösen".replace('  ', ' '),
+                               'ts': (o['created'] or 0) / 1000 or now})
 
         # Klumpenrisiko: gleicher Coin, gleiche Richtung, mehrere Konten
         groups = {}

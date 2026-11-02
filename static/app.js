@@ -224,7 +224,7 @@ function viewBot(name) {
   <div class="card" id="botpos"></div>
   ${otherOrders.length ? `<h2>Wartende Orders <small>${otherOrders.length}</small></h2>
     <div class="card tight">${otherOrders.slice(0, 8).map((o) => `<div class="li"><span class="grow">${esc(coin(o.symbol))}</span>
-      <span class="muted">${o.kind === 'trigger' ? 'Trigger' : 'Limit'} ${esc(o.side || '')}</span>
+      <span class="muted">${o.kind === 'trail' ? 'Trailing' : o.kind === 'trigger' ? 'Trigger' : 'Limit'} ${esc(o.side || '')}</span>
       <span class="mono">${price(o.trigger || o.price)}</span></div>`).join('')}
       ${otherOrders.length > 8 ? `<div class="li muted">… und ${otherOrders.length - 8} weitere</div>` : ''}</div>` : ''}
   <h2>Letzte Trades <small>antippen für Chart</small></h2>
@@ -246,21 +246,30 @@ function liqInfo(p) {
 function ladder(p, slFirst, liqCol) {
   if (!p.mark || !p.entry) return '';
   const showLiq = p.liq && !slFirst;
-  const marks = [['S', p.sl, 'var(--down)', 0], ['T', p.tp, 'var(--up)', 0], ['E', p.entry, 'var(--muted)', 1], ['L', showLiq ? p.liq : null, 'var(--down)', 1]]
+  const trail = !p.tp && p.trail ? p.trail : null;
+  const marks = [['S', p.sl, 'var(--down)', 0], ['T', p.tp, 'var(--up)', 0], ['A', trail, 'var(--up)', 0], ['E', p.entry, 'var(--muted)', 1], ['L', showLiq ? p.liq : null, 'var(--down)', 1]]
     .filter((m) => m[1]);
-  const vals = [...marks.map((m) => m[1]), p.mark], lo = Math.min(...vals), hi = Math.max(...vals);
+  const vals = [...marks.map((m) => m[1]), p.mark];
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  const tUp = trail && trail > p.entry;
+  if (trail) { const ext = (hi - lo) * 0.2; if (tUp) hi += ext; else lo -= ext; }
   const X0 = 12, X1 = 308, x = (v) => (hi > lo ? X0 + (v - lo) / (hi - lo) * (X1 - X0) : (X0 + X1) / 2);
   const zone = (a, b, col) => (a && b ? `<rect x="${Math.min(x(a), x(b)).toFixed(1)}" y="25" width="${Math.abs(x(a) - x(b)).toFixed(1)}" height="8" fill="${col}" fill-opacity=".22"/>` : '');
-  const ticks = marks.map(([l, v, col, below]) => `<line x1="${x(v).toFixed(1)}" x2="${x(v).toFixed(1)}" y1="19" y2="39" stroke="${col}" stroke-width="2"${l === 'L' ? ' stroke-dasharray="3 2"' : ''}/>
+  const tail = trail ? `<rect x="${Math.min(x(p.entry), x(trail)).toFixed(1)}" y="25" width="${Math.abs(x(p.entry) - x(trail)).toFixed(1)}" height="8" fill="var(--up)" fill-opacity=".12"/>
+      <line x1="${x(trail).toFixed(1)}" x2="${tUp ? X1 - 2 : X0 + 2}" y1="29" y2="29" stroke="var(--up)" stroke-width="2" stroke-dasharray="4 3"/>
+      <path d="M${tUp ? X1 : X0} 29 l${tUp ? -8 : 8} -6 v12 z" fill="var(--up)"/>` : '';
+  const ticks = marks.map(([l, v, col, below]) => `<line x1="${x(v).toFixed(1)}" x2="${x(v).toFixed(1)}" y1="19" y2="39" stroke="${col}" stroke-width="2"${l === 'L' || l === 'A' ? ' stroke-dasharray="3 2"' : ''}/>
     <text x="${x(v).toFixed(1)}" y="${below ? 52 : 13}" text-anchor="middle" fill="${col}">${l}</text>`).join('');
   const pct = (v) => (v / p.mark - 1) * 100 * (p.side === 'short' ? -1 : 1);
   const toSl = p.sl ? Math.abs(p.mark / p.sl - 1) * 100 : null, toTp = p.tp ? Math.abs(p.tp / p.mark - 1) * 100 : null;
   return `<svg class="ladder" viewBox="0 0 320 58" role="img" aria-label="Preisleiter">
       <line x1="${X0}" x2="${X1}" y1="29" y2="29" stroke="var(--line)" stroke-width="2"/>
-      ${zone(p.sl, p.entry, 'var(--down)')}${zone(p.entry, p.tp, 'var(--up)')}${ticks}
+      ${zone(p.sl, p.entry, 'var(--down)')}${zone(p.entry, p.tp, 'var(--up)')}${tail}${ticks}
       <circle cx="${x(p.mark).toFixed(1)}" cy="29" r="6" fill="var(--text)" stroke="var(--card)" stroke-width="2.5"/></svg>
     <div class="ladtxt"><span><i style="background:var(--down)"></i>S = Stop-Loss${toSl != null ? ` <b class="mono">${nf(toSl, 1)} %</b> entfernt` : ' <b class="warn">fehlt</b>'}</span>
-      <span><i style="background:var(--up)"></i>T = Take-Profit${toTp != null ? ` <b class="mono">${nf(toTp, 1)} %</b> entfernt` : ' —'}</span>
+      ${trail ? `<span><i style="background:var(--up)"></i>A = Trailing-Start <b class="mono">${nf(Math.abs(trail / p.mark - 1) * 100, 1)} %</b> entfernt</span>
+        <span class="tnote">Ab ${price(trail)} folgt der Stop dem Kurs mit ${p.trail_cb != null ? nf(p.trail_cb, 1) + ' %' : 'festem'} Abstand. Kein festes Ziel (Pfeil).</span>`
+        : `<span><i style="background:var(--up)"></i>T = Take-Profit${toTp != null ? ` <b class="mono">${nf(toTp, 1)} %</b> entfernt` : ' —'}</span>`}
       <span><i style="background:var(--muted)"></i>E = Einstieg · ● = Kurs <b class="mono ${cls(pct(p.entry) * -1)}">${signed(-pct(p.entry), 1)} %</b></span>
       ${p.liq ? `<span><i style="background:${liqCol}"></i>${showLiq ? 'L = ' : ''}Liquidation ${price(p.liq)} · <b class="mono" style="color:${liqCol}">${nf(p.liq_pct, 1)} %</b>${slFirst ? ' · SL greift vorher' : ''}</span>` : ''}</div>`;
 }
@@ -279,7 +288,7 @@ function viewAlerts() {
   ${a.length ? a.map((x) => `<div class="alert ${x.level}"><span class="ic" aria-hidden="true">!</span>
     <div class="t"><b>${esc(x.title)}${x.bot ? ` <span class="muted" style="font-weight:400">· ${esc(x.bot)}</span>` : ''}</b>
     <span>${esc(x.text)}</span></div></div>`).join('') : '<div class="ok">Alles in Ordnung – kein Alarm.</div>'}
-  <div class="lbl" style="text-align:center">Geprüft: Bot läuft, Stop-Loss vorhanden, Abstand zur Liquidation, gleiche Coins in mehreren Bots, Bitget erreichbar.</div>
+  <div class="lbl" style="text-align:center">Geprüft: Bot läuft, Stop-Loss vorhanden, Abstand zur Liquidation, gleiche Coins in mehreren Bots, Orders ohne Position, Bitget erreichbar.</div>
   <h2>Mitteilungen <small>aufs iPhone</small></h2>
   <div class="card" id="pushbox"><div class="empty">lädt …</div></div>
   <h2>Was ist passiert? <small>letzte 7 Tage</small></h2>
