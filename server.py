@@ -161,6 +161,10 @@ def paper_summary(path, day_start_ms):
         s = json.load(f)
     stakes = sum(p.get('stake', 0.0) for p in s.get('positions', []))
     stakes += sum(c.get('stake', 0.0) for c in (s.get('baer') or {}).values())
+    bt = (s.get('btc_trend') or {}).get('pos')
+    stakes += bt['margin'] if bt else 0.0
+    ul = list(((s.get('unlock') or {}).get('pos') or {}).values())
+    stakes += sum(p.get('stake', 0.0) for p in ul)
     equity = s.get('cash', 0.0) + stakes
     units = s.get('units') or s.get('start') or 100.0
     closed = s.get('closed', [])
@@ -179,7 +183,10 @@ def paper_summary(path, day_start_ms):
         'pnl_total': sum(usd(c) for c in closed), 'trades_total': len(closed),
         'wins': sum(1 for c in closed if c.get('r', 0) > 0),
         'open': [{'coin': p.get('coin'), 'art': p.get('genom') or p.get('art'), 'stake': p.get('stake'), 'lev': p.get('lev'),
-                  'entry_ms': p.get('entry_ms'), 'exit_ms': p.get('exit_ms')} for p in s.get('positions', [])],
+                  'entry_ms': p.get('entry_ms'), 'exit_ms': p.get('exit_ms')} for p in s.get('positions', [])]
+                + ([{'coin': 'BTC', 'art': 'BTC-Trend', 'stake': bt['margin'], 'lev': 3, 'entry_ms': bt['t_ms'], 'exit_ms': None}] if bt else [])
+                + [{'coin': p.get('coin'), 'art': 'Unlock-Short', 'stake': p.get('stake'), 'lev': 1, 'entry_ms': p.get('entry_ms'),
+                    'exit_ms': None} for p in ul],
         'live': 'live_since' in s, 'mult': s.get('last_mult'),
         'evo': {'bestand': st, 'aktiv': [k for k, m in pop.items() if m.get('status') == 'aktiv'],
                 'geburten': sum(1 for e in log if e[1] == 'geboren'),
