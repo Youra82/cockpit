@@ -140,13 +140,52 @@ def discover_bots(cfg):
         entries = [b if isinstance(b, dict) else {'name': b} for b in cfg['bots']]
         for e in entries:
             e.setdefault('path', os.path.join(root, e['name']))
+    if not any(e.get('name') == 'evobot' for e in entries) and os.path.isfile(os.path.join(root, 'evobot', 'data', 'arten', 'konto.json')):
+        entries.append({'name': 'evobot', 'path': os.path.join(root, 'evobot'), 'paper': 'evobot/data/arten/konto.json'})
     bots = []
     for e in entries:
+        if e.get('paper'):                       # Papierkonto (z. B. evobot): Datei statt Bitget-Schlüssel
+            bots.append({'name': e['name'], 'path': e['path'], 'account': None, 'fp': None, 'pfp': 'paper:' + e['name'],
+                         'paper': os.path.join(root, e['paper']), 'cycle': e.get('cycle_minutes') or 60})
+            continue
         acc = load_account(e['path'], e['name'])
         fp = hashlib.sha256(acc['apiKey'].encode()).hexdigest()[:12] if acc else None
         cycle = e.get('cycle_minutes') or cfg['cycle_minutes'].get(e['name']) or cfg['default_cycle_minutes']
         bots.append({'name': e['name'], 'path': e['path'], 'account': acc, 'fp': fp, 'cycle': cycle})
     return bots
+
+
+def paper_summary(path, day_start_ms):
+    """Kennzahlen eines evobot-Papierkontos (data/arten/konto.json), nur lesend."""
+    with open(path, encoding='utf-8') as f:
+        s = json.load(f)
+    stakes = sum(p.get('stake', 0.0) for p in s.get('positions', []))
+    stakes += sum(c.get('stake', 0.0) for c in (s.get('baer') or {}).values())
+    equity = s.get('cash', 0.0) + stakes
+    units = s.get('units') or s.get('start') or 100.0
+    closed = s.get('closed', [])
+    usd = lambda c: c.get('stake', 0.0) * c.get('lev', 1) * c.get('r', 0.0)
+    today = [c for c in closed if c.get('closed_ms', 0) >= day_start_ms]
+    evo = s.get('evo') or {}
+    pop = evo.get('pop') or {}
+    st = {}
+    for m in pop.values():
+        st[m.get('status')] = st.get(m.get('status'), 0) + 1
+    log = [e for e in (evo.get('log') or [])]
+    return {
+        'equity': equity, 'start': s.get('start', 100.0), 'nav': equity / units if units else None,
+        'einzahlungen': sum(e.get('betrag', 0) for e in s.get('einzahlungen', [])),
+        'pnl_today': sum(usd(c) for c in today), 'trades_today': len(today),
+        'pnl_total': sum(usd(c) for c in closed), 'trades_total': len(closed),
+        'wins': sum(1 for c in closed if c.get('r', 0) > 0),
+        'open': [{'coin': p.get('coin'), 'art': p.get('genom') or p.get('art'), 'stake': p.get('stake'), 'lev': p.get('lev'),
+                  'entry_ms': p.get('entry_ms'), 'exit_ms': p.get('exit_ms')} for p in s.get('positions', [])],
+        'live': 'live_since' in s, 'mult': s.get('last_mult'),
+        'evo': {'bestand': st, 'aktiv': [k for k, m in pop.items() if m.get('status') == 'aktiv'],
+                'geburten': sum(1 for e in log if e[1] == 'geboren'),
+                'ereignisse': [{'t': e[0], 'was': e[1], 'genom': e[2], 'info': e[3]} for e in log if e[1] != 'geboren'][-12:]},
+        'mtime': os.path.getmtime(path),
+    }
 
 
 def last_activity(bot_path):
@@ -621,6 +660,16 @@ class Poller(threading.Thread):
     def poll_once(self):
         seen = set()
         for b in self.bots:
+            if b.get('paper'):
+                a = self.accounts.setdefault(b['pfp'], {'data': None, 'ts': None})
+                try:
+                    tz = timezone(timedelta(hours=self.cfg['timezone_offset_hours']))
+                    day0 = int(datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+                    a['paper'] = paper_summary(b['paper'], day0); a['ts'], a['error'] = time.time(), None
+                    self.store.add_snap(b['pfp'], a['paper']['equity'])
+                except Exception as e:
+                    a['error'] = f'{type(e).__name__}: {str(e)[:160]}'
+                continue
             if not b['fp'] or b['fp'] in seen:
                 continue
             seen.add(b['fp'])
@@ -646,6 +695,20 @@ class Poller(threading.Thread):
 
         bots, alerts = [], []
         for b in self.bots:
+            if b.get('paper'):
+                a = self.accounts.get(b['pfp']) or {}
+                ps = a.get('paper') or {}
+                act = ps.get('mtime')
+                running = act is not None and now - act < max(20, b['cycle'] * 3) * 60
+                bots.append({'name': b['name'], 'running': running, 'last_activity': act, 'cycle': b['cycle'],
+                             'has_key': False, 'paper': ps or None, 'shared_with': [], 'equity': ps.get('equity'),
+                             'available': None, 'upnl': 0.0, 'positions': [], 'orders': [],
+                             'pnl_today': ps.get('pnl_today', 0.0), 'trades_today': ps.get('trades_today', 0),
+                             'error': a.get('error'), 'data_ts': a.get('ts'), 'git': self.git.get(b['name'])})
+                if not running:
+                    alerts.append({'level': 'warn', 'bot': b['name'], 'title': 'Papierkonto aktualisiert sich nicht',
+                                   'text': a.get('error') or 'konto.json seit über 3 Stunden unverändert', 'ts': act or now})
+                continue
             act = last_activity(b['path'])
             stale_after = max(20, b['cycle'] * 3) * 60
             running = act is not None and now - act < stale_after
@@ -787,7 +850,7 @@ class App:
     def fps_for(self, bot):
         if bot in (None, '', 'all'):
             return sorted({b['fp'] for b in self.bots if b['fp']})
-        return [b['fp'] for b in self.bots if b['name'] == bot and b['fp']]
+        return [b['fp'] or b.get('pfp') for b in self.bots if b['name'] == bot and (b['fp'] or b.get('pfp'))]
 
     def span(self, rng):
         """(Beginn, Bucket-Sekunden) eines Zeitraums."""

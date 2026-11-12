@@ -181,7 +181,14 @@ function viewHome() {
   </div>
   <h2>Meine Bots <small>Zahl = realisiert heute</small></h2>
   ${bots.map((b) => {
-    const status = !b.has_key ? 'kein API-Schlüssel gefunden' : b.running ? `läuft · ${ago(b.last_activity)}` : `steht · letzter Lauf ${ago(b.last_activity)}`;
+    const status = b.paper ? `Papierkonto · ${b.running ? 'läuft' : 'steht'} · ${ago(b.last_activity)}`
+      : !b.has_key ? 'kein API-Schlüssel gefunden' : b.running ? `läuft · ${ago(b.last_activity)}` : `steht · letzter Lauf ${ago(b.last_activity)}`;
+    if (b.paper) return `<a class="bot" href="#/bot/${encodeURIComponent(b.name)}">
+      <span class="dot ${b.running ? 'on' : 'off'}" aria-hidden="true"></span>
+      <div class="t"><b>${esc(b.name)}</b><span>${status}</span></div>
+      <div class="r"><b class="${cls(b.pnl_today)}">${signed(b.pnl_today)}</b>
+        <span>${nf(b.equity)} USDT · ${b.paper.open.length} Pos. · Papier</span></div>
+      ${icon.chev}</a>`;
     return `<a class="bot" href="#/bot/${encodeURIComponent(b.name)}">
       <span class="dot ${b.running ? 'on' : 'off'}" aria-hidden="true"></span>
       <div class="t"><b>${esc(b.name)}</b><span>${status}</span></div>
@@ -208,9 +215,44 @@ function allPositions() {
   return out;
 }
 
+function viewPaper(b) {
+  const p = b.paper || {}; const e = p.evo || {}; const st = e.bestand || {};
+  const ren = p.nav != null ? (p.nav - 1) * 100 : null;
+  const dt = (ms) => ms ? new Date(ms).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
+  const was = { 'befördert': 'befördert', 'herabgestuft': 'herabgestuft', 'ausgestorben': 'ausgestorben' };
+  return `${header(esc(b.name), `<span class="dot ${b.running ? 'on' : 'off'}" style="display:inline-block;width:8px;height:8px;margin-right:6px"></span>Papierkonto · ${b.running ? 'läuft' : 'steht'} · ${ago(b.last_activity)}`, true)}
+  ${b.error ? `<div class="note">Papierkonto nicht lesbar: ${esc(b.error)}</div>` : ''}
+  <div class="note">${p.live ? 'Echtgeld-Modus' : 'Papierkonto mit echten Bitget-Kursen – kein echtes Geld, zählt nicht zum Gesamtkapital.'}</div>
+  <div class="card">
+    <div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Kontostand (Einsatz offener Positionen zum Einstand)</span><span class="mid">${nf(b.equity)} USDT</span></div>
+    <span class="lbl">Rendite seit Start (ohne Einzahlungen): <b class="${cls(ren)}">${ren == null ? '—' : (ren >= 0 ? '+' : '') + ren.toFixed(2) + ' %'}</b> · Start ${nf(p.start)} USDT${p.einzahlungen ? ` · Einzahlungen ${nf(p.einzahlungen)}` : ''}</span>
+    <span class="lbl">Heute ${signed(p.pnl_today)} USDT (${p.trades_today || 0} Trades) · gesamt ${signed(p.pnl_total)} USDT in ${p.trades_total || 0} Trades · Treffer ${p.trades_total ? Math.round(100 * p.wins / p.trades_total) : 0} % · Einsatzfaktor ${p.mult ? '×' + String(p.mult).replace('.', ',') : '—'}</span>
+    ${chartControls()}
+    <div id="botchart"><div class="empty">lädt …</div></div>
+  </div>
+  <h2>Offene Papier-Positionen <small>${(p.open || []).length}</small></h2>
+  <div class="card tight">${(p.open || []).length ? p.open.map((o) => `<div class="li"><span class="grow">${esc(o.coin)}</span>
+    <span class="muted">${esc(String(o.art).replace('evo:', 'Mutant '))} · ${o.lev}x</span><span class="mono">${nf(o.stake)} USDT · bis ${dt(o.exit_ms)}</span></div>`).join('')
+    : '<div class="empty">keine offenen Positionen</div>'}</div>
+  <h2>Evolution <small>Vorwärts-Selektion</small></h2>
+  <div class="card">
+    <div class="tiles">
+      <div class="tile"><span class="lbl">Ahnen</span><b>${st.ahne || 0}</b></div>
+      <div class="tile"><span class="lbl">Befördert</span><b>${st.aktiv || 0}</b></div>
+      <div class="tile"><span class="lbl">Schatten</span><b>${st.schatten || 0}</b></div>
+    </div>
+    <span class="lbl">${e.geburten || 0} Mutanten geboren. Befördert wird nur, wer nach seiner Geburt ≥ 20 Ereignisse lang besser war als sein Elternteil (t &gt; 1,5, Ø &gt; 0).</span>
+    ${(e.aktiv || []).length ? `<span class="lbl">Aktive Mutanten: ${e.aktiv.map(esc).join(' · ')}</span>` : ''}
+  </div>
+  <div class="card tight">${(e.ereignisse || []).length ? e.ereignisse.slice().reverse().map((x) => `<div class="li"><span class="mono">${dt(x.t)}</span>
+    <span class="grow">${esc(was[x.was] || x.was)}</span><span class="muted">${esc(x.genom)}</span></div>`).join('')
+    : '<div class="empty">noch keine Beförderung oder Herabstufung – Mutanten sammeln Ereignisse</div>'}</div>`;
+}
+
 function viewBot(name) {
   const b = state.bots.find((x) => x.name === name);
   if (!b) return `${header('Nicht gefunden', '', true)}`;
+  if (b.paper) return viewPaper(b);
   const protectedSyms = new Set(b.positions.map((p) => p.symbol));
   const otherOrders = b.orders.filter((o) => !(o.reduce && protectedSyms.has(o.symbol)) && o.kind !== 'tpsl');
   const status = b.running ? `läuft · letzter Lauf ${ago(b.last_activity)}` : `steht · letzter Lauf ${ago(b.last_activity)}`;
