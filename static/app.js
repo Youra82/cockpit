@@ -516,6 +516,45 @@ async function siriPanel(box) {
   });
 }
 
+// ------------------------------------------------------------------ Zonen (Treppe/Aufzug, nur Anzeige)
+function viewZones() {
+  return `${header('Zonen', 'Treppe & Aufzug · Bitget 1h')}
+  <div class="card"><span class="lbl">Jeder Coin ist gerade in einem Bein: langsam (<b>Treppe</b>), mindestens 3× schneller als das Bein davor
+  (<b>Aufzug</b>) oder in der Gegenbewegung nach einem Aufzug (<b>Rückprall</b>). Gemessen in Tagesschwankungen σ.
+  Das Band zeigt, wie weit solche Beine 2022–2026 typisch liefen (mittlere Hälfte, Strich = Median).
+  <b>FVG-Leiter</b>: die nächsten offenen Fair Value Gaps (1D/4h) in Laufrichtung. Ein Aufzug endet in 41 % der Fälle in einer
+  solchen Zone (Zufall 32 %); bricht er durch, fängt ihn die nächste überzufällig oft. Nur Orientierung: als Handelssignal war
+  das 2025–26 nach Kosten nicht profitabel.</span></div>
+  <div id="zonen"><div class="empty">lädt …</div></div>`;
+}
+
+function drawZones(el, z) {
+  const pz = (v) => v == null ? '—' : v < 0.01 ? Number(v).toPrecision(4).replace('.', ',') : price(v);
+  if (!z.coins.length) { el.innerHTML = `<div class="empty">${z.laedt ? 'Wird berechnet (rund eine Minute) …' : 'Keine Daten.'}</div>`; return; }
+  const rows = [...z.coins].sort((a, b) => b.fortschritt - a.fortschritt);
+  const farbe = { Aufzug: 'var(--warn)', Treppe: 'var(--accent)', 'Rückprall': 'var(--up)' };
+  el.innerHTML = `<div class="lbl" style="margin:4px 2px 8px">Stand ${ago(z.ts)} · ${rows.length} Coins · sortiert nach Fortschritt</div>` + rows.map((c) => {
+    const max = Math.max(c.q[2] * 1.35, c.gelaufen_sigma * 1.05), x = (v) => Math.min(100, 100 * v / max);
+    const pfeil = c.richtung === 'hoch' ? '↗' : '↘';
+    const ueber = c.gelaufen_sigma >= c.q[2] ? ' · über der Zone' : c.gelaufen_sigma >= c.q[0] ? ' · in der Zone' : '';
+    return `<div class="pos" style="margin-bottom:8px">
+      <div class="row" style="justify-content:space-between"><b>${esc(c.coin)}</b>
+        <span style="color:${farbe[c.art]};font-weight:600">${pfeil} ${c.art} ${c.richtung}</span></div>
+      <div style="position:relative;height:14px;border-radius:7px;background:var(--soft)" role="img"
+        aria-label="${c.gelaufen_sigma} σ gelaufen, Zone ${c.q[0]} bis ${c.q[2]} σ">
+        <div style="position:absolute;left:${x(c.q[0])}%;width:${x(c.q[2]) - x(c.q[0])}%;top:0;bottom:0;background:var(--accent-bg);border-radius:7px"></div>
+        <div style="position:absolute;left:${x(c.q[1])}%;top:-2px;bottom:-2px;width:2px;background:var(--muted)"></div>
+        <div style="position:absolute;left:0;width:${x(c.gelaufen_sigma)}%;top:4px;height:6px;border-radius:3px;background:${farbe[c.art]}"></div>
+      </div>
+      <div class="lbl">gelaufen <b>${nf(c.gelaufen_sigma, 1)} σ</b> (${nf(c.gelaufen_pct, 1)} %) in ${c.dauer_h} h · 1 σ = ${nf(c.sigma_pct, 1)} %${ueber}
+        ${c.zurueck_sigma >= 0.5 ? ` · seit dem Extrem ${nf(c.zurueck_sigma, 1)} σ zurück` : ''}</div>
+      <div class="lbl">typische Zone ${pz(c.zone[0])} – ${pz(c.zone[2])} (Median ${pz(c.zone[1])}) · Start ${pz(c.start)} · jetzt ${pz(c.preis)}</div>
+      ${c.leiter && c.leiter.length ? `<div class="lbl">FVG-Leiter ${c.richtung === 'runter' ? 'darunter' : 'darüber'}: ${c.leiter.map((l, i) =>
+        `<b>${i + 1}.</b> ${pz(l[0])} – ${pz(l[1])} <span style="color:var(--dim)">(${l[2]}, ${nf(100 * Math.abs((c.richtung === 'runter' ? l[1] : l[0]) / c.preis - 1), 1)} % entfernt)</span>`).join(' · ')}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
 // ------------------------------------------------------------------ Steuerung
 function route() {
   const h = location.hash.replace(/^#/, '') || '/';
@@ -533,7 +572,7 @@ async function render() {
   badge.hidden = !crit; badge.textContent = crit;
 
   const html = r.name === 'bot' ? viewBot(r.arg) : r.name === 'trade' ? viewTrade(r.arg) : r.name === 'alarme' ? viewAlerts()
-    : r.name === 'auswertung' ? viewStats() : r.name === 'server' ? viewServer() : viewHome();
+    : r.name === 'auswertung' ? viewStats() : r.name === 'server' ? viewServer() : r.name === 'zonen' ? viewZones() : viewHome();
   app.innerHTML = html;
   document.getElementById('reload')?.addEventListener('click', refresh);
   document.getElementById('tradeback')?.addEventListener('click', (ev) => { if (history.length > 1) { ev.preventDefault(); history.back(); } });
@@ -563,6 +602,10 @@ async function render() {
         const cd = await api(`/api/candles?symbol=${encodeURIComponent(t.symbol)}&from=${t.ctime}&to=${t.utime}`);
         if (box) drawTradeChart(box, t, cd);
       } catch (e) { if (box) box.innerHTML = `<div class="empty">Kerzen konnten nicht geladen werden (${esc(e.message)}).</div>`; }
+    } else if (r.name === 'zonen') {
+      const el = document.getElementById('zonen'); const z = await api('/api/zones');
+      if (el) drawZones(el, z);
+      if (z.laedt) setTimeout(() => { if (route().name === 'zonen') render(); }, 15000);
     } else if (r.name === 'server') {
       const sb = document.getElementById('siribox'); if (sb) await siriPanel(sb);
     } else if (r.name === 'alarme') {

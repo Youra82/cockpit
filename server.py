@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import secrets
 import shutil
@@ -27,6 +28,7 @@ from urllib.parse import parse_qs, urlparse
 import ccxt
 
 import push
+import zonen
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(BASE, 'static')
@@ -847,6 +849,7 @@ class App:
         self.token = hmac.new(self.key, str(cfg['password']).encode(), hashlib.sha256).hexdigest()
         self.public, self.candle_cache = None, {}
         self.market_cache, self.market_lock = {}, threading.Lock()
+        self.zones_cache, self.zones_busy = {'ts': 0, 'coins': []}, threading.Lock()
         sk = os.path.join(DATA, 'siri_key')
         if not os.path.isfile(sk):
             with open(sk, 'w') as f:
@@ -1038,6 +1041,51 @@ class App:
                 m['funding'], m['fts'] = fund, now
             return {'btc': m.get('btc', []), 'beta': m.get('beta', {}), 'funding': m.get('funding', {})}
 
+    ZONEN_COINS = ("ETH SOL XRP BNB DOGE LINK AAVE ADA AVAX DOT LTC BCH ATOM FIL NEAR UNI ETC TRX OP INJ XLM ALGO "
+                   "SUI APT ARB SEI TIA WLD PEPE SHIB WIF FET ORDI STX IMX RUNE GALA SAND MANA AXS CRV LDO "
+                   "DYDX GMX EGLD HBAR VET ICP ENS COMP SNX CHZ BTC").split()
+
+    def zones(self):
+        """Treppe/Aufzug-Zonen der evobot-Coins (oeffentliche Bitget-1h-Kerzen, alle 30 min im Hintergrund neu)."""
+        c = self.zones_cache
+        if time.time() - c['ts'] > 1800 and self.zones_busy.acquire(blocking=False):
+            threading.Thread(target=self._zones_refresh, daemon=True).start()
+        return {'ts': c['ts'], 'coins': c['coins'], 'laedt': self.zones_busy.locked()}
+
+    def _zones_refresh(self):
+        try:
+            ex = self.public_client(); out = []; now = int(time.time() * 1000)
+            for name in self.ZONEN_COINS:
+                sym = f'{name}/USDT:USDT'
+                try:
+                    def hole(tf, sec, n, lim):
+                        rows, since = {}, now - n * sec * 1000
+                        while since < now:
+                            part = ex.fetch_ohlcv(sym, tf, since, lim)
+                            if not part:
+                                break
+                            rows.update({int(r[0]): r for r in part})
+                            nxt = int(part[-1][0]) + sec * 1000
+                            if nxt <= since or len(part) < 2:
+                                break
+                            since = nxt
+                        return [[k, *rows[k][1:5]] for k in sorted(rows) if k + sec * 1000 <= now]   # nur abgeschlossene
+                    cd = hole('1h', 3600, 2000, 1000)
+                    z = zonen.analyse(cd)
+                    if z:
+                        side = 1 if z['richtung'] == 'runter' else -1
+                        sig = math.log(1 + z['sigma_pct'] / 100)
+                        try:
+                            z['leiter'] = zonen.leiter(hole('4h', 14400, 1000, 1000), hole('1d', 86400, 270, 90), z['preis'], side, sig)
+                        except Exception as e:
+                            log.warning('FVG-Leiter %s: %s', name, str(e)[:120]); z['leiter'] = []
+                        out.append({'coin': name, **z})
+                except Exception as e:
+                    log.warning('Zonen %s: %s', name, str(e)[:120])
+            self.zones_cache = {'ts': time.time(), 'coins': out}
+        finally:
+            self.zones_busy.release()
+
     def summary_text(self):
         """Kurzfassung zum Vorlesen (Siri-Kurzbefehl)."""
         st = self.poller.snapshot()
@@ -1165,6 +1213,8 @@ def make_handler(app):
                     return self.send_json(app.market())
                 except Exception as e:
                     return self.send_json({'error': f'{type(e).__name__}: {str(e)[:120]}'}, 502)
+            if url.path == '/api/zones':
+                return self.send_json(app.zones())
             if url.path == '/api/state':
                 return self.send_json(app.poller.snapshot())
             if url.path == '/api/equity':
