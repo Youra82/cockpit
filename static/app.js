@@ -234,6 +234,11 @@ function viewPaper(b) {
   <div class="card tight">${(p.open || []).length ? p.open.map((o) => `<div class="li"><span class="grow">${esc(o.coin)}</span>
     <span class="muted">${esc(String(o.art).replace('evo:', 'Mutant '))} · ${o.lev}x</span><span class="mono">${nf(o.stake)} USDT · bis ${dt(o.exit_ms)}</span></div>`).join('')
     : '<div class="empty">keine offenen Positionen</div>'}</div>
+  <h2>FVG-Leiter <small>Schatten-Art · kein Kapital</small></h2>
+  <div class="card">${(() => { const L = p.leiter || {}; const f = (g) => g && g.n ? `${g.n} abgeschlossen · Ø ${g.avg >= 0 ? '+' : ''}${g.avg.toFixed(2).replace('.', ',')} % je Ereignis` : 'noch keine abgeschlossen';
+    return `<span class="lbl">Fiktive Kauf-Limits an den 3 nächsten offenen FVGs nach einem Aufzug runter. Bewertet wird nur das Bullenregime.</span>
+    <span class="lbl">Bullenregime (Regel): <b>${f(L.bulle)}</b></span><span class="lbl">Bärenregime (nur Info): ${f(L.baer)}</span>
+    ${(L.offen || []).length ? `<span class="lbl">Offen: ${L.offen.map((o) => esc(o.coin) + (o.bulle ? '' : ' (Bär)')).join(' · ')}</span>` : '<span class="lbl">Keine offenen Ansätze.</span>'}`; })()}</div>
   <h2>Evolution <small>Vorwärts-Selektion</small></h2>
   <div class="card">
     <div class="tiles">

@@ -157,6 +157,17 @@ def discover_bots(cfg):
     return bots
 
 
+def _leiter_summary(st):
+    """FVG-Leiter (Schatten-Art ohne Kapital): offene Ansätze und Ergebnis, getrennt nach Regime."""
+    out = {'offen': [{'coin': x.get('coin'), 't_start': x.get('t_start'), 'bulle': x.get('bulle', True), 'stand': x.get('stand')}
+                     for x in st.get('setups') or []]}
+    for name, want in (('bulle', True), ('baer', False)):
+        f = [x for x in st.get('fertig') or [] if x.get('bulle', True) == want]
+        out[name] = {'n': len(f), 'avg': (100 * sum(x['r'] for x in f) / len(f)) if f else None,
+                     'sum': (100 * sum(x['r'] for x in f)) if f else None}
+    return out
+
+
 def paper_summary(path, day_start_ms):
     """Kennzahlen eines evobot-Papierkontos (data/arten/konto.json), nur lesend."""
     with open(path, encoding='utf-8') as f:
@@ -186,10 +197,12 @@ def paper_summary(path, day_start_ms):
         'wins': sum(1 for c in closed if c.get('r', 0) > 0),
         'open': [{'coin': p.get('coin'), 'art': p.get('genom') or p.get('art'), 'stake': p.get('stake'), 'lev': p.get('lev'),
                   'entry_ms': p.get('entry_ms'), 'exit_ms': p.get('exit_ms')} for p in s.get('positions', [])]
-                + ([{'coin': 'BTC', 'art': 'BTC-Trend', 'stake': bt['margin'], 'lev': 3, 'entry_ms': bt['t_ms'], 'exit_ms': None}] if bt else [])
+                + ([{'coin': 'BTC', 'art': 'BTC-Trend ' + ('Short' if bt.get('side', 1) == -1 else 'Long'), 'stake': bt['margin'],
+                     'lev': bt.get('lev', 5), 'entry_ms': bt['t_ms'], 'exit_ms': None}] if bt else [])
                 + [{'coin': p.get('coin'), 'art': 'Unlock-Short', 'stake': p.get('stake'), 'lev': 1, 'entry_ms': p.get('entry_ms'),
                     'exit_ms': None} for p in ul],
         'live': 'live_since' in s, 'mult': s.get('last_mult'),
+        'leiter': _leiter_summary(s.get('leiter') or {}),
         'evo': {'bestand': st, 'aktiv': [k for k, m in pop.items() if m.get('status') == 'aktiv'],
                 'geburten': sum(1 for e in log if e[1] == 'geboren'),
                 'ereignisse': [{'t': e[0], 'was': e[1], 'genom': e[2], 'info': e[3]} for e in log if e[1] != 'geboren'][-12:]},
