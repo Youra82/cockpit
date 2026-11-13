@@ -888,3 +888,104 @@ function drawFees(box, trades) {
       <span class="mono ${cls(r.gross)}">${signed(r.gross, 1)}</span><span class="mono up">${nf(r.save)}</span></div>`).join('')}</div>
     <div class="lbl">Rot = Gebühren in USDT (${rows.map(([b, r]) => `${esc(b)} ${nf(r.fees)}`).join(' · ')}). „Kurs“ = Kursgewinn vor Gebühren. Taker-Anteil geschätzt aus der Gebührenhöhe je Umsatz (Standard: Taker 0,06 %, Maker 0,02 %).</div>`;
 }
+
+// ------------------------------------------------------------------ Z: Treppe/Aufzug – alle Coins auf einen Blick
+// x = gelaufene Strecke im Verhältnis zum Median der typischen Zone (0 = Start, 1 = Median). Je Phase eine Bahn,
+// Farbe = Richtung. Antippen wählt den Coin für den Kerzenchart.
+function drawZoneAll(box, coins, sel, onPick) {
+  if (!coins.length) return tooFew(box, 'Kein Coin passt zum Filter.');
+  const X0 = 10, X1 = 330, XM = 2.2, x = (v) => X0 + Math.min(XM, Math.max(0, v)) / XM * (X1 - X0);
+  const lanes = ['Aufzug', 'Treppe', 'Rückprall'].map((art) => ({ art, cs: coins.filter((c) => c.art === art) })).filter((l) => l.cs.length);
+  const band = [0, 2].map((j) => coins.reduce((s, c) => s + c.q[j] / c.q[1], 0) / coins.length);
+  // Beschriftungen ohne Überlappung: je Bahn Unterzeilen, ein Name kommt in die erste freie Zeile
+  let y = 22;
+  lanes.forEach((l) => {
+    const ends = [];
+    l.pos = [...l.cs].sort((a, b) => a.fortschritt - b.fortschritt).map((c) => {
+      const px = x(c.fortschritt), w = c.coin.length * 6.2 + 12, left = px + w > 356;   // am rechten Rand: Name links vom Punkt
+      const a = left ? px - w : px - 4;
+      let r = ends.findIndex((e) => e < a);
+      if (r < 0) { r = ends.length; ends.push(0); }
+      ends[r] = left ? px + 6 : px + w;
+      return { c, px, r, left };
+    });
+    l.y0 = y; l.h = Math.max(1, ends.length) * 13 + 16; y += l.h + 6;
+  });
+  const H = y + 16;
+  box.innerHTML = `<div class="info"></div><svg class="viz" viewBox="0 0 360 ${H}" role="img" aria-label="Alle Coins nach Phase und Fortschritt"></svg>`;
+  const svg = box.querySelector('svg'), info = box.querySelector('.info');
+  const say = (c) => {
+    info.innerHTML = c ? `<span><b>${esc(c.coin)}</b> ${c.richtung === 'hoch' ? '↗' : '↘'} ${esc(c.art)} ${esc(c.richtung)} · gelaufen <b>${nf(c.gelaufen_sigma, 1)} σ</b> (${nf(c.gelaufen_pct, 1)} %)</span>
+      <span>${nf(100 * c.fortschritt, 0)} % des Medians · typische Zone ${nf(c.q[0], 1)}–${nf(c.q[2], 1)} σ · antippen für den Chart</span>`
+      : '<span>Punkt = Coin, Farbe = Richtung (grün hoch, rot runter). Rechts vom hellen Band: weiter gelaufen als üblich.</span><span>Antippen öffnet den Kerzenchart darunter.</span>';
+  };
+  svgEl('rect', { x: x(band[0]), y: 14, width: x(band[1]) - x(band[0]), height: H - 30, fill: cssVar('--accent'), 'fill-opacity': 0.1, rx: 4 }, svg);
+  svgEl('line', { x1: x(1), x2: x(1), y1: 14, y2: H - 16, stroke: cssVar('--muted'), 'stroke-dasharray': '3 3' }, svg);
+  svgText(svg, x(0), 10, 'Start'); svgText(svg, x(1), 10, 'Median', 'middle'); svgText(svg, X1, 10, '2× Median+', 'end');
+  svgText(svg, (x(band[0]) + x(band[1])) / 2, H - 4, 'typische Zone', 'middle');
+  lanes.forEach((l) => {
+    svgEl('line', { x1: X0, x2: X1, y1: l.y0 + l.h, y2: l.y0 + l.h, class: 'grid' }, svg);
+    svgText(svg, X0, l.y0 + 9, `${l.art} (${l.cs.length})`, 'start', true);
+    l.pos.forEach(({ c, px, r, left }) => {
+      const cy = l.y0 + 22 + r * 13, col = cssVar(c.richtung === 'hoch' ? '--up' : '--down'), on = c.coin === sel;
+      const g = svgEl('g', { style: 'cursor:pointer', role: 'button', tabindex: 0, 'aria-label': `${c.coin} ${c.art} ${c.richtung}` }, svg);
+      svgEl('rect', { x: left ? px - c.coin.length * 6.2 - 10 : px - 6, y: cy - 9, width: c.coin.length * 6.2 + 16, height: 13, fill: 'transparent' }, g);
+      svgEl('circle', { cx: px, cy: cy - 3, r: on ? 5 : 3.6, fill: col, stroke: on ? cssVar('--text') : cssVar('--card'), 'stroke-width': on ? 2 : 1.5 }, g);
+      const t = svgText(g, left ? px - 7 : px + 7, cy + 0.5, c.coin, left ? 'end' : 'start', on);
+      if (!on) t.setAttribute('style', `fill:${cssVar('--muted')}`);
+      g.addEventListener('pointerenter', () => say(c)); g.addEventListener('pointerleave', () => say(null));
+      g.addEventListener('click', () => onPick(c.coin));
+      g.addEventListener('keydown', (e) => { if (e.key === 'Enter') onPick(c.coin); });
+    });
+  });
+  say(null);
+}
+
+// ------------------------------------------------------------------ Z: Kerzenchart eines Coins mit Start, typischer Zone und FVG-Leiter
+function drawZoneChart(box, c, data) {
+  const C = (data && data.c) || [];
+  if (C.length < 3) return tooFew(box, 'Keine Kerzen geladen.');
+  const { svg, say } = chartShell(box, 250, `Kerzenchart ${c.coin} mit Zone`);
+  const lad = (c.leiter || []).slice(0, 3);
+  const vals = [...C.map((k) => k[2]), ...C.map((k) => k[3]), c.start, c.zone[0], c.zone[2], ...lad.map((l) => l[0]), ...lad.map((l) => l[1])];
+  const lo0 = Math.min(...vals), hi0 = Math.max(...vals), pad = (hi0 - lo0) * 0.06, lo = lo0 - pad, hi = hi0 + pad;
+  const X0 = 6, X1 = 300, Y0 = 8, Y1 = 214, N = C.length, cw = (X1 - X0) / N;
+  const x = (i) => X0 + i * cw + cw / 2, y = (v) => Y0 + (1 - (v - lo) / (hi - lo)) * (Y1 - Y0);
+  const idx = (ms) => { let i = 0; while (i < N - 1 && C[i + 1][0] <= ms) i++; return i; };
+  const iS = idx(c.start_ms), dec = Math.max(0, Math.min(6, 3 - Math.floor(Math.log10(Math.abs(c.preis) || 1))));
+  const pz = (v) => v < 0.01 ? Number(v).toPrecision(4).replace('.', ',') : price(v);
+  const colText = (t, v) => { t.setAttribute('style', `fill:${cssVar(v)}`); return t; };
+  niceTicks(lo, hi, 4).forEach((v) => { svgEl('line', { x1: X0, x2: X1, y1: y(v), y2: y(v), class: 'grid' }, svg); svgText(svg, X1 + 4, y(v) + 3, nf(v, dec)); });
+  // typische Zone ab dem Start des Beins
+  const zA = y(Math.max(c.zone[0], c.zone[2])), zB = y(Math.min(c.zone[0], c.zone[2]));
+  svgEl('rect', { x: x(iS), y: zA, width: X1 - x(iS), height: Math.max(2, zB - zA), fill: cssVar('--accent'), 'fill-opacity': 0.16 }, svg);
+  svgEl('line', { x1: x(iS), x2: X1, y1: y(c.zone[1]), y2: y(c.zone[1]), stroke: cssVar('--accent'), 'stroke-dasharray': '4 3' }, svg);
+  colText(svgText(svg, X1 - 2, c.richtung === 'runter' ? zB + 11 : zA - 4, 'typische Zone', 'end'), '--accent');
+  // FVG-Leiter in Laufrichtung
+  lad.forEach((l, i) => {
+    const a = y(Math.max(l[0], l[1])), b = y(Math.min(l[0], l[1]));
+    svgEl('rect', { x: X0, y: a, width: X1 - X0, height: Math.max(2, b - a), fill: cssVar('--warn'), 'fill-opacity': 0.16, stroke: cssVar('--warn'), 'stroke-opacity': 0.45 }, svg);
+    colText(svgText(svg, X0 + 3, b - a > 11 ? b - 3 : a - 3, `FVG ${i + 1} · ${l[2]}`), '--warn');
+  });
+  // Kerzen
+  C.forEach((k, i) => {
+    const col = cssVar(k[4] >= k[1] ? '--up' : '--down');
+    svgEl('line', { x1: x(i), x2: x(i), y1: y(k[2]), y2: y(k[3]), stroke: col }, svg);
+    svgEl('rect', { x: x(i) - cw * 0.32, y: y(Math.max(k[1], k[4])), width: Math.max(1, cw * 0.64), height: Math.max(1, Math.abs(y(k[1]) - y(k[4]))), fill: col }, svg);
+  });
+  // Start des Beins und aktueller Kurs
+  svgEl('line', { x1: x(iS), x2: x(iS), y1: Y0, y2: Y1, class: 'link' }, svg);
+  svgEl('circle', { cx: x(iS), cy: y(c.start), r: 4, fill: cssVar('--text'), stroke: cssVar('--card'), 'stroke-width': 2 }, svg);
+  svgText(svg, Math.max(X0 + 14, x(iS)), c.richtung === 'runter' ? y(c.start) - 8 : y(c.start) + 15, 'Start', 'middle', true);
+  svgEl('line', { x1: X0, x2: X1, y1: y(c.preis), y2: y(c.preis), stroke: cssVar('--text'), 'stroke-opacity': 0.5, 'stroke-dasharray': '1 3' }, svg);
+  svgText(svg, X0, 232, timeStr(C[0][0])); svgText(svg, X1, 232, `${data.tf}-Kerzen`, 'end');
+  const vl = svgEl('line', { y1: Y0, y2: Y1, class: 'cursor', visibility: 'hidden' }, svg);
+  const rest = () => say(`<span><b>${esc(c.coin)}</b> ${c.richtung === 'hoch' ? '↗' : '↘'} ${esc(c.art)} ${esc(c.richtung)} · gelaufen <b>${nf(c.gelaufen_sigma, 1)} σ</b> (${nf(c.gelaufen_pct, 1)} %) in ${c.dauer_h} h</span>
+    <span>Start ${pz(c.start)} → jetzt ${pz(c.preis)} · Zone ${pz(Math.min(c.zone[0], c.zone[2]))}–${pz(Math.max(c.zone[0], c.zone[2]))}${lad.length ? ` · nächste FVG ${pz(lad[0][0])}–${pz(lad[0][1])}` : ''}</span>`);
+  rest();
+  scrubX(svg, N, X0 + cw / 2, X1 - cw / 2, (i) => {
+    const k = C[i];
+    vl.setAttribute('x1', x(i)); vl.setAttribute('x2', x(i)); vl.setAttribute('visibility', 'visible');
+    say(`<span>${timeStr(k[0])} · ${data.tf}-Kerze</span><span class="mono">E ${pz(k[1])} · H ${pz(k[2])} · T ${pz(k[3])} · S <b class="${cls(k[4] - k[1])}">${pz(k[4])}</b></span>`);
+  }, () => { vl.setAttribute('visibility', 'hidden'); rest(); });
+}

@@ -1063,12 +1063,18 @@ class App:
         c = self.zones_cache
         if time.time() - c['ts'] > 1800 and self.zones_busy.acquire(blocking=False):
             threading.Thread(target=self._zones_refresh, daemon=True).start()
-        return {'ts': c['ts'], 'coins': c['coins'], 'laedt': self.zones_busy.locked()}
+        return {'ts': c['ts'], 'coins': c['coins'], 'laedt': self.zones_busy.locked(),
+                'fertig': c.get('fertig', len(c['coins'])), 'gesamt': len(self.ZONEN_COINS)}
 
     def _zones_refresh(self):
         try:
             ex = self.public_client(); out = []; now = int(time.time() * 1000)
-            for name in self.ZONEN_COINS:
+            erst = not self.zones_cache['coins']             # erster Lauf: jeden fertigen Coin sofort zeigen
+            for i, name in enumerate(self.ZONEN_COINS):
+                if erst and out:
+                    self.zones_cache = {'ts': time.time(), 'coins': list(out), 'fertig': i}
+                elif not erst:
+                    self.zones_cache = dict(self.zones_cache, fertig=i)
                 sym = f'{name}/USDT:USDT'
                 try:
                     def hole(tf, sec, n, lim):
@@ -1095,7 +1101,10 @@ class App:
                         out.append({'coin': name, **z})
                 except Exception as e:
                     log.warning('Zonen %s: %s', name, str(e)[:120])
-            self.zones_cache = {'ts': time.time(), 'coins': out}
+            self.zones_cache = {'ts': time.time(), 'coins': out, 'fertig': len(self.ZONEN_COINS)}
+            log.info('Zonen: %d/%d Coins berechnet', len(out), len(self.ZONEN_COINS))
+        except Exception:
+            log.exception('Zonen-Berechnung abgebrochen')
         finally:
             self.zones_busy.release()
 

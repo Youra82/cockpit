@@ -533,12 +533,75 @@ function viewZones() {
   <div id="zonen"><div class="empty">lädt …</div></div>`;
 }
 
+// Auswahl bleibt beim Neuzeichnen erhalten (Filter, gewählter Coin, Kerzen-Cache)
+const zoneUi = { sel: null, phase: 'alle', dir: 'alle', cd: {} };
 function drawZones(el, z) {
+  const lauf = z.laedt ? ` · berechnet ${z.fertig || 0}/${z.gesamt || '?'} Coins …` : '';
+  if (!z.coins.length) { el.innerHTML = `<div class="empty">${z.laedt ? `Wird berechnet (${z.fertig || 0}/${z.gesamt || '?'} Coins, insgesamt 3–5 Minuten) …` : 'Keine Daten – Protokoll prüfen.'}</div>`; return; }
+  const all = [...z.coins].sort((a, b) => b.fortschritt - a.fortschritt);
+  const rows = all.filter((c) => (zoneUi.phase === 'alle' || c.art === zoneUi.phase) && (zoneUi.dir === 'alle' || c.richtung === zoneUi.dir));
+  if (!rows.some((c) => c.coin === zoneUi.sel)) zoneUi.sel = rows.length ? rows[0].coin : null;
+  const cur = rows.find((c) => c.coin === zoneUi.sel);
+  el.innerHTML = `<div class="lbl" style="margin:4px 2px 8px">Stand ${ago(z.ts)} · ${all.length} Coins${lauf}</div>
+    <div class="seg wrap" id="zph" role="group" aria-label="Phase"></div>
+    <div class="seg wrap" id="zdi" role="group" aria-label="Richtung"></div>
+    <div class="card"><h2 style="margin:0">Alle Coins <small>${rows.length} Coins</small></h2><div id="zall"></div></div>
+    <div class="card" id="zcard">
+      <div class="row" style="justify-content:space-between;align-items:center;gap:8px">
+        <button class="btn ghost" id="zprev" type="button" aria-label="vorheriger Coin" style="min-width:44px">‹</button>
+        <select id="zsel" aria-label="Coin wählen" style="flex:1;min-height:40px;border-radius:10px;background:var(--bg);color:var(--text);border:1px solid var(--line);padding:0 10px;font:inherit;font-weight:600">
+          ${rows.map((c) => `<option value="${esc(c.coin)}"${c.coin === zoneUi.sel ? ' selected' : ''}>${esc(c.coin)} · ${c.richtung === 'hoch' ? '↗' : '↘'} ${esc(c.art)} · ${nf(100 * c.fortschritt, 0)} %</option>`).join('')}
+        </select>
+        <button class="btn ghost" id="znext" type="button" aria-label="nächster Coin" style="min-width:44px">›</button>
+      </div>
+      <div id="zchart">${cur ? '<div class="empty">Kerzen laden …</div>' : '<div class="empty">Kein Coin passt zum Filter.</div>'}</div>
+      <span class="lbl">Punkt + senkrechte Linie: Start des aktuellen Beins. Blaues Band: wie weit solche Beine typisch laufen (gestrichelt = Median).
+        Orange: offene FVG-Zonen in Laufrichtung (1 = nächste). Gepunktet: aktueller Kurs. Finger über den Chart: Kerzenwerte.</span>
+    </div>
+    <details class="card"><summary style="cursor:pointer;font-weight:600">Liste aller Coins (${rows.length})</summary>${zoneList(rows)}</details>`;
+  const seg = (id, key, opts) => {
+    const box = el.querySelector(id);
+    opts.forEach(([v, l]) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.textContent = l; b.className = zoneUi[key] === v ? 'on' : '';
+      b.addEventListener('click', () => { zoneUi[key] = v; drawZones(el, z); });
+      box.appendChild(b);
+    });
+  };
+  const n = (art) => all.filter((c) => c.art === art).length;
+  seg('#zph', 'phase', [['alle', `Alle ${all.length}`], ['Aufzug', `Aufzug ${n('Aufzug')}`], ['Treppe', `Treppe ${n('Treppe')}`], ['Rückprall', `Rückprall ${n('Rückprall')}`]]);
+  seg('#zdi', 'dir', [['alle', 'beide Richtungen'], ['hoch', '↗ hoch'], ['runter', '↘ runter']]);
+  const pick = (coin, scroll) => {
+    zoneUi.sel = coin; drawZones(el, z);
+    if (scroll) el.querySelector('#zcard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  drawZoneAll(el.querySelector('#zall'), rows, zoneUi.sel, (c) => pick(c, true));
+  el.querySelector('#zsel').addEventListener('change', (e) => pick(e.target.value));
+  const step = (d) => { const i = rows.findIndex((c) => c.coin === zoneUi.sel); if (rows.length) pick(rows[(i + d + rows.length) % rows.length].coin); };
+  el.querySelector('#zprev').addEventListener('click', () => step(-1));
+  el.querySelector('#znext').addEventListener('click', () => step(1));
+  if (cur) zoneChart(el.querySelector('#zchart'), cur);
+}
+
+async function zoneChart(box, c) {
+  const now = Date.now(), key = c.coin, hit = zoneUi.cd[key];
+  try {
+    let cd = hit && now - hit.t < 300000 && hit.start === c.start_ms ? hit.cd : null;
+    if (!cd) {
+      const from = Math.round(c.start_ms - Math.max(86400000, 0.35 * (now - c.start_ms)));
+      cd = await api(`/api/candles?symbol=${encodeURIComponent(c.coin + '/USDT:USDT')}&from=${from}&to=${now}`);
+      zoneUi.cd[key] = { t: now, start: c.start_ms, cd };
+    }
+    if (zoneUi.sel === c.coin && box.isConnected) drawZoneChart(box, c, cd);
+  } catch (e) {
+    if (box.isConnected) box.innerHTML = `<div class="empty">Kerzen konnten nicht geladen werden (${esc(e.message)}).</div>`;
+  }
+}
+
+function zoneList(rows) {
   const pz = (v) => v == null ? '—' : v < 0.01 ? Number(v).toPrecision(4).replace('.', ',') : price(v);
-  if (!z.coins.length) { el.innerHTML = `<div class="empty">${z.laedt ? 'Wird berechnet (rund eine Minute) …' : 'Keine Daten.'}</div>`; return; }
-  const rows = [...z.coins].sort((a, b) => b.fortschritt - a.fortschritt);
   const farbe = { Aufzug: 'var(--warn)', Treppe: 'var(--accent)', 'Rückprall': 'var(--up)' };
-  el.innerHTML = `<div class="lbl" style="margin:4px 2px 8px">Stand ${ago(z.ts)} · ${rows.length} Coins · sortiert nach Fortschritt</div>` + rows.map((c) => {
+  return rows.map((c) => {
     const max = Math.max(c.q[2] * 1.35, c.gelaufen_sigma * 1.05), x = (v) => Math.min(100, 100 * v / max);
     const pfeil = c.richtung === 'hoch' ? '↗' : '↘';
     const ueber = c.gelaufen_sigma >= c.q[2] ? ' · über der Zone' : c.gelaufen_sigma >= c.q[0] ? ' · in der Zone' : '';
@@ -559,6 +622,7 @@ function drawZones(el, z) {
     </div>`;
   }).join('');
 }
+
 
 // ------------------------------------------------------------------ Steuerung
 function route() {
