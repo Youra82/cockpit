@@ -168,7 +168,112 @@ def _leiter_summary(st):
     return out
 
 
-def paper_summary(path, day_start_ms):
+_TICKERS = {'ts': 0, 'px': {}}
+
+
+def bitget_prices(max_age=55):
+    """Letzte Kurse aller USDT-Perps (oeffentlicher Bitget-Abruf, ein Request, nur lesend)."""
+    if time.time() - _TICKERS['ts'] > max_age:
+        import urllib.request
+        url = f'https://api.bitget.com/api/v2/mix/market/tickers?productType={PRODUCT}'
+        d = json.loads(urllib.request.urlopen(url, timeout=15).read())
+        _TICKERS['px'] = {t['symbol']: float(t['lastPr']) for t in d.get('data') or [] if t.get('lastPr')}
+        _TICKERS['ts'] = time.time()
+    return _TICKERS['px']
+
+
+# evobot-Konstanten (evobot/src/evobot: arten.py, evo_live.py, btc_trend.py, unlock_short.py, baer/bull_rule.py)
+EVO_SYM = {'1000PEPE': 'PEPE', '1000SHIB': 'SHIB'}
+EVO_LIQ_BUFFER, EVO_SPREAD, EVO_FEE = 0.01, 0.0005, 0.0006
+EVO_KA, EVO_KC = 1.0, 2.0
+EVO_ART = {'crash': 'Crash-Long', 'pump': 'Pump-Long'}
+
+
+def paper_positions(s, prices):
+    """Offene Papier-Positionen im Format von norm_position (Kurs, offenes Ergebnis, Liquidation, Ziel).
+    evobot handelt ohne Stop-Loss: Verlustgrenze ist die Liquidation ('nosl'; sl nur bei aktivem Trailing-Stop)."""
+    out = []
+
+    def row(coin, side, entry, lev, margin, upnl_fn, opened, liq, art, ziel, sl=None, tp=None, trail=None, trail_cb=None,
+            symbol=None, nosl=True):
+        sym = symbol or EVO_SYM.get(coin, coin) + 'USDT'
+        mark = prices.get(sym)
+        upnl = max(-margin, upnl_fn(mark)) if mark and entry else 0.0
+        out.append({'symbol': f'{coin}/USDT:USDT', 'side': side, 'size': None, 'entry': entry, 'mark': mark, 'upnl': upnl,
+                    'leverage': lev, 'liq': liq, 'liq_pct': abs(mark - liq) / mark * 100 if mark and liq else None,
+                    'notional': margin * lev, 'margin': margin, 'opened': opened, 'sl': sl, 'tp': tp, 'trail': trail,
+                    'trail_cb': trail_cb, 'nosl': nosl, 'art': art, 'ziel': ziel})
+
+    for p in s.get('positions', []):
+        lev, e, st = p.get('lev', 1), p['entry_px'], p.get('stake', 0.0)
+        eff = p.get('entry_eff') or e
+        g = str(p.get('genom') or p.get('art'))
+        art = ('Mutant ' if g.startswith('evo:') else '') + EVO_ART.get(p.get('art'), p.get('art'))
+        tr, trail, cb, sl = p.get('trail'), None, None, None
+        if tr:
+            trail, cb = e * (1 + EVO_KA * tr['sd']), 100 * EVO_KC * tr['sd']
+            if tr.get('aktiv'):
+                sl = tr['ext'] * (1 - EVO_KC * tr['sd'])
+        out_ms = p.get('exit_ms')
+        row(p['coin'], 'long', e, lev, st,
+            lambda m, eff=eff, st=st, lev=lev: st * lev * (m * (1 - EVO_SPREAD) * (1 - EVO_FEE) / eff - 1),
+            p.get('entry_ms'), e * (1 - (1 / lev - EVO_LIQ_BUFFER)) if lev > 1 else None, art,
+            {'typ': 'zeit', 'ms': out_ms}, sl=sl, trail=trail, trail_cb=cb)
+
+    bt = (s.get('btc_trend') or {}).get('pos')
+    if bt:
+        side, lev, e = bt.get('side', 1), bt.get('lev', 5), bt['entry_px']
+
+        def bt_pnl(m, bt=bt, side=side):
+            days = max(0.0, (time.time() * 1000 - bt['t_ms']) / 86_400_000)
+            n = bt['notional']
+            if side == 1:
+                gross = n * (m * (1 - EVO_SPREAD) / (e * (1 + EVO_SPREAD)) - 1); fund = 0.10
+            else:
+                gross = n * (1 - m * (1 + EVO_SPREAD) / (e * (1 - EVO_SPREAD))); fund = 0.05
+            return gross - n * EVO_FEE * 2 - n * fund * days / 365
+        row('BTC', 'long' if side == 1 else 'short', e, lev, bt['margin'], bt_pnl, bt['t_ms'],
+            e * (1 + (1 / lev - 0.005) * (-1 if side == 1 else 1)), 'BTC-Trend ' + ('Long' if side == 1 else 'Short'),
+            {'typ': 'trend', 'seite': side})
+
+    for u in ((s.get('unlock') or {}).get('pos') or {}).values():
+        e, st = u['entry_px'], u.get('stake', 0.0)
+        row(u['coin'], 'short', e, 1, st, lambda m, e=e, st=st: st * (1 - m / e - 2 * EVO_FEE - EVO_SPREAD),
+            u.get('entry_ms'), e * 1.95, 'Unlock-Short', {'typ': 'unlock', 'tag_ms': u.get('tag_ms'),
+                                                          'frist_ms': (u.get('tag_ms') or 0) + 14 * 86_400_000},
+            symbol=u.get('symbol'))
+
+    for coin, cs in (s.get('baer') or {}).items():          # Bär-Short (Regel derzeit aus)
+        pos = cs.get('pos')
+        if pos and cs.get('stake'):
+            a = pos['avg']
+            row(coin, 'short', a, 3, cs['stake'], lambda m, a=a, st=cs['stake']: st * 3 * (1 - m * (1 + EVO_SPREAD) / a - 0.0008),
+                pos.get('t'), a * (1 + 1 / 3 - EVO_LIQ_BUFFER), 'Bär-Short', {'typ': 'mitte'}, sl=a * 1.30, tp=cs.get('ema'), nosl=False)
+    for coin, cs in (s.get('bull') or {}).items():          # Envelope-Long (Regel derzeit aus)
+        pos = (cs.get('state') or {}).get('pos')
+        if pos and cs.get('stake'):
+            a, hi, lo = pos['avg'], cs.get('hi') or [], cs.get('lo') or []
+            row(coin, 'long', a, 2, cs['stake'], lambda m, a=a, st=cs['stake']: st * 2 * (m * (1 - EVO_SPREAD) / a - 1 - 0.0008),
+                pos.get('t'), a * (1 - 1 / 2 + EVO_LIQ_BUFFER), 'Envelope-Long', {'typ': 'mitte'}, sl=a * 0.75,
+                tp=(max(hi) + min(lo)) / 2 if hi and lo else None, nosl=False)
+    return out
+
+
+def paper_closed(s, n=25):
+    """Letzte geschlossene Papier-Trades (neueste zuerst)."""
+    name = {'btc_trend': 'BTC-Trend Long', 'btc_trend_short': 'BTC-Trend Short', 'unlock_short': 'Unlock-Short',
+            'baer': 'Bär-Short', 'bull': 'Envelope-Long', 'leiter': 'FVG-Leiter'}
+    out = []
+    for c in sorted(s.get('closed', []), key=lambda c: c.get('closed_ms', 0), reverse=True)[:n]:
+        g = str(c.get('genom') or c.get('art') or '')
+        art = name.get(c.get('art')) or (('Mutant ' if g.startswith('evo:') else '') + EVO_ART.get(c.get('art'), c.get('art') or '?'))
+        out.append({'coin': c.get('coin'), 'art': art, 'ms': c.get('closed_ms'), 'r': c.get('r', 0.0),
+                    'usd': c.get('stake', 0.0) * max(-1.0, c.get('lev', 1) * c.get('r', 0.0)),
+                    'grund': c.get('grund') or c.get('reason') or ('liquidiert' if c.get('liquidated') else '')})
+    return out
+
+
+def paper_summary(path, day_start_ms, prices=None):
     """Kennzahlen eines evobot-Papierkontos (data/arten/konto.json), nur lesend."""
     with open(path, encoding='utf-8') as f:
         s = json.load(f)
@@ -190,7 +295,7 @@ def paper_summary(path, day_start_ms):
         st[m.get('status')] = st.get(m.get('status'), 0) + 1
     log = [e for e in (evo.get('log') or [])]
     return {
-        'equity': equity, 'start': s.get('start', 100.0), 'nav': equity / units if units else None,
+        'equity': equity, 'cash': s.get('cash', 0.0), 'start': s.get('start', 100.0), 'nav': equity / units if units else None,
         'einzahlungen': sum(e.get('betrag', 0) for e in s.get('einzahlungen', [])),
         'pnl_today': sum(usd(c) for c in today), 'trades_today': len(today),
         'pnl_total': sum(usd(c) for c in closed), 'trades_total': len(closed),
@@ -201,6 +306,7 @@ def paper_summary(path, day_start_ms):
                      'lev': bt.get('lev', 5), 'entry_ms': bt['t_ms'], 'exit_ms': None}] if bt else [])
                 + [{'coin': p.get('coin'), 'art': 'Unlock-Short', 'stake': p.get('stake'), 'lev': 1, 'entry_ms': p.get('entry_ms'),
                     'exit_ms': None} for p in ul],
+        'positions': paper_positions(s, prices or {}), 'letzte': paper_closed(s),
         'live': 'live_since' in s, 'mult': s.get('last_mult'),
         'leiter': _leiter_summary(s.get('leiter') or {}),
         'evo': {'bestand': st, 'aktiv': [k for k, m in pop.items() if m.get('status') == 'aktiv'],
@@ -687,7 +793,12 @@ class Poller(threading.Thread):
                 try:
                     tz = timezone(timedelta(hours=self.cfg['timezone_offset_hours']))
                     day0 = int(datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
-                    a['paper'] = paper_summary(b['paper'], day0); a['ts'], a['error'] = time.time(), None
+                    try:
+                        prices = bitget_prices()
+                    except Exception as e:              # ohne Kurse: Positionen ohne offenes Ergebnis zeigen
+                        log.warning('Bitget-Kurse fuer %s nicht abrufbar: %s', b['name'], e)
+                        prices = _TICKERS['px']
+                    a['paper'] = paper_summary(b['paper'], day0, prices); a['ts'], a['error'] = time.time(), None
                     self.store.add_snap(b['pfp'], a['paper']['equity'])
                 except Exception as e:
                     a['error'] = f'{type(e).__name__}: {str(e)[:160]}'
@@ -724,7 +835,8 @@ class Poller(threading.Thread):
                 running = act is not None and now - act < max(20, b['cycle'] * 3) * 60
                 bots.append({'name': b['name'], 'running': running, 'last_activity': act, 'cycle': b['cycle'],
                              'has_key': False, 'paper': ps or None, 'shared_with': [], 'equity': ps.get('equity'),
-                             'available': None, 'upnl': 0.0, 'positions': [], 'orders': [],
+                             'available': ps.get('cash'), 'upnl': sum(x['upnl'] for x in ps.get('positions') or []),
+                             'positions': [], 'orders': [],
                              'pnl_today': ps.get('pnl_today', 0.0), 'trades_today': ps.get('trades_today', 0),
                              'error': a.get('error'), 'data_ts': a.get('ts'), 'git': self.git.get(b['name'])})
                 if not running:

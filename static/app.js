@@ -12,7 +12,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const nf = (v, d = 2) => v == null || isNaN(v) ? '—' : Number(v).toLocaleString('de-DE', { minimumFractionDigits: d, maximumFractionDigits: d });
 const signed = (v, d = 2) => v == null || isNaN(v) ? '—' : (v > 0 ? '+' : v < 0 ? '−' : '±') + nf(Math.abs(v), d);
 const cls = (v) => v > 0 ? 'up' : v < 0 ? 'down' : 'muted';
-const price = (v) => v == null ? '—' : nf(v, v >= 100 ? 2 : v >= 1 ? 4 : 6);
+const price = (v) => v == null ? '—' : nf(v, v >= 100 ? 2 : v >= 1 ? 4 : Math.max(6, Math.min(10, 3 - Math.floor(Math.log10(Math.abs(v) || 1)))));
 const coin = (sym) => String(sym || '').split(':')[0];
 function ago(ts) {
   if (!ts) return 'unbekannt';
@@ -224,16 +224,22 @@ function viewPaper(b) {
   ${b.error ? `<div class="note">Papierkonto nicht lesbar: ${esc(b.error)}</div>` : ''}
   <div class="note">${p.live ? 'Echtgeld-Modus' : 'Papierkonto mit echten Bitget-Kursen – kein echtes Geld, zählt nicht zum Gesamtkapital.'}</div>
   <div class="card">
-    <div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Kontostand (Einsatz offener Positionen zum Einstand)</span><span class="mid">${nf(b.equity)} USDT</span></div>
+    <div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Kontostand (inkl. offener Positionen)</span><span class="mid">${nf((b.equity || 0) + (b.upnl || 0))} USDT</span></div>
+    ${pnlSplit(b.pnl_today, b.upnl)}
     <span class="lbl">Rendite seit Start (ohne Einzahlungen): <b class="${cls(ren)}">${ren == null ? '—' : (ren >= 0 ? '+' : '') + ren.toFixed(2) + ' %'}</b> · Start ${nf(p.start)} USDT${p.einzahlungen ? ` · Einzahlungen ${nf(p.einzahlungen)}` : ''}</span>
     <span class="lbl">Heute ${signed(p.pnl_today)} USDT (${p.trades_today || 0} Trades) · gesamt ${signed(p.pnl_total)} USDT in ${p.trades_total || 0} Trades · Treffer ${p.trades_total ? Math.round(100 * p.wins / p.trades_total) : 0} % · Einsatzfaktor ${p.mult ? '×' + String(p.mult).replace('.', ',') : '—'}</span>
     ${chartControls()}
     <div id="botchart"><div class="empty">lädt …</div></div>
+    <span class="lbl">Frei verfügbar: ${nf(b.available)} USDT</span>
   </div>
-  <h2>Offene Papier-Positionen <small>${(p.open || []).length}</small></h2>
-  <div class="card tight">${(p.open || []).length ? p.open.map((o) => `<div class="li"><span class="grow">${esc(o.coin)}</span>
-    <span class="muted">${esc(String(o.art).replace('evo:', 'Mutant '))} · ${o.lev}x</span><span class="mono">${nf(o.stake)} USDT · bis ${dt(o.exit_ms)}</span></div>`).join('')
-    : '<div class="empty">keine offenen Positionen</div>'}</div>
+  <h2>Offene Positionen <small>${(p.positions || []).length} · Papier</small></h2>
+  <div class="card" id="botpos"></div>
+  <h2>Letzte Trades <small>${p.trades_total || 0} gesamt</small></h2>
+  <div class="card tight">${(p.letzte || []).length ? p.letzte.map((c) => `<div class="li">
+    <span class="muted" style="width:86px">${c.ms ? timeStr(c.ms) : '—'}</span>
+    <span class="grow">${esc(c.coin || '')} <span class="muted">${esc(c.art)}${c.grund ? ' · ' + esc(c.grund) : ''}</span></span>
+    <b class="mono ${cls(c.usd)}">${signed(c.usd)}</b></div>`).join('')
+    : '<div class="empty">Noch keine geschlossenen Trades</div>'}</div>
   <h2>FVG-Leiter <small>Schatten-Art · kein Kapital</small></h2>
   <div class="card">${(() => { const L = p.leiter || {}; const f = (g) => g && g.n ? `${g.n} abgeschlossen · Ø ${g.avg >= 0 ? '+' : ''}${g.avg.toFixed(2).replace('.', ',')} % je Ereignis` : 'noch keine abgeschlossen';
     return `<span class="lbl">Fiktive Kauf-Limits an den 3 nächsten offenen FVGs nach einem Aufzug runter. Bewertet wird nur das Bullenregime.</span>
@@ -317,9 +323,11 @@ function ladder(p, slFirst, liqCol) {
       <line x1="${X0}" x2="${X1}" y1="29" y2="29" stroke="var(--line)" stroke-width="2"/>
       ${zone(p.sl, p.entry, 'var(--down)')}${zone(p.entry, p.tp, 'var(--up)')}${tail}${ticks}
       <circle cx="${x(p.mark).toFixed(1)}" cy="29" r="6" fill="var(--text)" stroke="var(--card)" stroke-width="2.5"/></svg>
-    <div class="ladtxt"><span><i style="background:var(--down)"></i>S = Stop-Loss${toSl != null ? ` <b class="mono">${nf(toSl, 1)} %</b> entfernt` : ' <b class="warn">fehlt</b>'}</span>
+    <div class="ladtxt"><span><i style="background:var(--down)"></i>${p.nosl && !p.sl ? 'Kein Stop-Loss (Regel) – Verlustgrenze ist die Liquidation L'
+      : `S = ${p.nosl ? 'Trailing-Stop' : 'Stop-Loss'}${toSl != null ? ` <b class="mono">${nf(toSl, 1)} %</b> entfernt` : ' <b class="warn">fehlt</b>'}`}</span>
       ${trail ? `<span><i style="background:var(--up)"></i>A = Trailing-Start <b class="mono">${nf(Math.abs(trail / p.mark - 1) * 100, 1)} %</b> entfernt</span>
         <span class="tnote">Ab ${price(trail)} folgt der Stop dem Kurs mit ${p.trail_cb != null ? nf(p.trail_cb, 1) + ' %' : 'festem'} Abstand. Kein festes Ziel (Pfeil).</span>`
+        : p.ziel && !p.tp ? '<span><i style="background:var(--up)"></i>Kein festes Take-Profit – Ausstieg siehe oben</span>'
         : `<span><i style="background:var(--up)"></i>T = Take-Profit${toTp != null ? ` <b class="mono">${nf(toTp, 1)} %</b> entfernt` : ' —'}</span>`}
       <span><i style="background:var(--muted)"></i>E = Einstieg · ● = Kurs <b class="mono ${cls(pct(p.entry) * -1)}">${signed(-pct(p.entry), 1)} %</b></span>
       ${p.liq ? `<span><i style="background:${liqCol}"></i>${showLiq ? 'L = ' : ''}Liquidation ${price(p.liq)} · <b class="mono" style="color:${liqCol}">${nf(p.liq_pct, 1)} %</b>${slFirst ? ' · SL greift vorher' : ''}</span>` : ''}</div>`;
@@ -652,7 +660,7 @@ async function render() {
   const eq = (bot) => api(`/api/equity?bot=${encodeURIComponent(bot)}&range=${ui.range}&mode=${ui.mode}`);
   const ap = document.getElementById('allpos'); if (ap) drawPositions(ap, allPositions(), true);
   const bp = document.getElementById('botpos');
-  if (bp) { const bb = state.bots.find((x) => x.name === r.arg); drawPositions(bp, bb.positions.map((p) => ({ ...p, bot: bb.name })), false); }
+  if (bp) { const bb = state.bots.find((x) => x.name === r.arg); drawPositions(bp, (bb.paper ? bb.paper.positions || [] : bb.positions).map((p) => ({ ...p, bot: bb.name })), false); }
   try {
     if (r.name === 'home') {
       const [pts, market] = await Promise.all([eq('all'), api('/api/market').catch(() => null)]);

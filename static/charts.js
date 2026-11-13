@@ -555,7 +555,10 @@ let posSort = 'gefahr';
 const posOpen = new Set();
 function drawPositions(box, rows, withBot) {
   if (!rows.length) { box.innerHTML = '<div class="empty">Keine offene Position</div>'; return; }
-  const toSl = (p) => (p.sl && p.mark ? Math.abs(p.mark / p.sl - 1) * 100 : null);
+  // Ohne Stop-Loss (evobot-Papier): Verlustgrenze ist die Liquidation
+  const stopOf = (p) => p.sl || (p.nosl ? p.liq : null);
+  const toSl = (p) => (!p.sl && p.nosl ? p.liq_pct ?? null   // Weg bis zur Liquidation, bezogen auf den Kurs
+    : stopOf(p) && p.mark ? Math.abs(p.mark / stopOf(p) - 1) * 100 : null);
   const sorts = {
     gefahr: ['Gefahr zuerst', (a, b) => (toSl(a) ?? -1) - (toSl(b) ?? -1)],
     verlust: ['Verlust zuerst', (a, b) => (a.upnl || 0) - (b.upnl || 0)],
@@ -570,7 +573,8 @@ function drawPositions(box, rows, withBot) {
     <div class="pls"><div class="bar"><i style="flex:${longs};background:var(--up)"></i><i style="flex:${rows.length - longs};background:var(--down)"></i></div>
       <div><span>${longs} Long</span><span>${rows.length - longs} Short</span></div></div>
     <div class="seg wrap" role="group" aria-label="Sortierung"></div><div class="plist"></div>
-    <div class="lbl">Balken: SL (rot), Einstieg (grau), Kurs (●), TP (grün). Gestrichelt grün mit Pfeil: ab hier Trailing-Stop, kein festes Ziel. Rechts der Abstand zum Stop-Loss: rot unter 2 %, gelb unter 5 %.</div>`;
+    <div class="lbl">Balken: SL (rot), Einstieg (grau), Kurs (●), TP (grün). Gestrichelt grün mit Pfeil: ab hier Trailing-Stop, kein festes Ziel. Rechts der Abstand zum Stop-Loss: rot unter 2 %, gelb unter 5 %.</div>
+    ${rows.some((p) => p.nosl) ? '<div class="lbl">Ohne Stop-Loss (Regel): rot ist dann die Liquidation, rechts „Liq“ = Abstand dorthin. Ausstieg nach Zeit, Trend oder Ziel – antippen zeigt, wann.</div>' : ''}`;
   const seg = box.querySelector('.seg');
   Object.entries(sorts).forEach(([k, [l]]) => {
     const bt = document.createElement('button');
@@ -581,7 +585,8 @@ function drawPositions(box, rows, withBot) {
   const mini = (p) => {
     // Ohne festes TP, aber mit Trailing-Stop: Start markieren und Platz fuer das offene Ende lassen
     const trail = !p.tp && p.trail ? p.trail : null;
-    const vals = [p.sl, p.tp, p.entry, p.mark, trail].filter((v) => v);
+    const sl = stopOf(p);
+    const vals = [sl, p.tp, p.entry, p.mark, trail].filter((v) => v);
     let lo = Math.min(...vals), hi = Math.max(...vals);
     const up = trail && trail > p.entry;
     if (trail) { const ext = (hi - lo) * 0.22; if (up) hi += ext; else lo -= ext; }
@@ -594,24 +599,25 @@ function drawPositions(box, rows, withBot) {
         <path d="M${e} 11 l${up ? -6 : 6} -5 v10 z" fill="var(--up)" fill-opacity=".8"/>`;
     })() : '';
     return `<svg viewBox="0 0 200 22" preserveAspectRatio="none" aria-hidden="true"><line x1="4" x2="196" y1="11" y2="11" stroke="var(--line)" stroke-width="2"/>
-      ${zone(p.sl, p.entry, 'var(--down)')}${zone(p.entry, p.tp, 'var(--up)')}${trail ? zone(p.entry, trail, 'var(--up)', 0.18) : ''}${tail}
-      ${tick(p.sl, 'var(--down)', 8)}${tick(p.tp, 'var(--up)', 8)}${tick(trail, 'var(--up)', 8, true)}${tick(p.entry, 'var(--muted)', 6)}
+      ${zone(sl, p.entry, 'var(--down)')}${zone(p.entry, p.tp, 'var(--up)')}${trail ? zone(p.entry, trail, 'var(--up)', 0.18) : ''}${tail}
+      ${tick(sl, 'var(--down)', 8, !p.sl)}${tick(p.tp, 'var(--up)', 8)}${tick(trail, 'var(--up)', 8, true)}${tick(p.entry, 'var(--muted)', 6)}
       <circle cx="${x(p.mark)}" cy="11" r="4.5" fill="var(--text)" stroke="var(--card)" stroke-width="2"/></svg>`;
   };
   const list = box.querySelector('.plist');
   [...rows].sort(sorts[posSort][1]).forEach((p) => {
-    const id = `${p.bot}|${p.symbol}|${p.side}`, d = toSl(p), open = posOpen.has(id);
+    const id = `${p.bot}|${p.symbol}|${p.side}${p.art ? '|' + p.art + '|' + p.opened : ''}`, d = toSl(p), open = posOpen.has(id);
     const dc = d == null || d < 2 ? 'r' : d < 5 ? 'y' : 'g';
     const { slFirst, liqCol } = liqInfo(p);
     const row = document.createElement('div');
     row.className = 'prow'; row.tabIndex = 0; row.setAttribute('role', 'button'); row.setAttribute('aria-expanded', String(open));
     row.innerHTML = `<div class="pwho">${withBot ? `<span class="pdot" style="background:${botColor(p.bot)}"></span>` : ''}<b>${esc(coin(p.symbol).split('/')[0])}</b>
         <span class="side ${p.side === 'short' ? 'short' : 'long'}">${esc((p.side || '').toUpperCase())}</span>
-        <span class="pbot">${p.leverage ? nf(p.leverage, 0) + '×' : ''}${withBot ? ` · ${esc(p.bot)}` : ''}</span></div>
+        <span class="pbot">${p.leverage ? nf(p.leverage, 0) + '×' : ''}${p.art ? ` · ${esc(p.art)}` : ''}${withBot ? ` · ${esc(p.bot)}` : ''}</span></div>
       <div class="ppnl mono ${cls(p.upnl)}">${signed(p.upnl)}</div>
-      <div class="pmini">${mini(p)}<span class="pdist ${dc}">${d == null ? 'kein SL' : `SL ${nf(d, 1)} %`}</span></div>
+      <div class="pmini">${mini(p)}<span class="pdist ${dc}">${d == null ? 'kein SL' : `${p.sl ? 'SL' : 'Liq'} ${nf(d, 1)} %`}</span></div>
       ${open ? `<div class="pdet"><div class="grid4"><span>Einstieg<b>${price(p.entry)}</b></span><span>Aktuell<b>${price(p.mark)}</b></span>
-          <span>SL<b class="${p.sl ? 'down' : 'warn'}">${p.sl ? price(p.sl) : 'FEHLT'}</b></span><span>${!p.tp && p.trail ? 'Trailing ab' : 'TP'}<b class="${p.tp || p.trail ? 'up' : 'muted'}">${p.tp ? price(p.tp) : p.trail ? price(p.trail) : '—'}</b></span></div>
+          ${p.nosl && !p.sl ? `<span>Stop-Loss<b class="muted">keiner · Liq ${price(p.liq)}</b></span>` : `<span>${p.nosl ? 'Trailing-Stop' : 'SL'}<b class="${p.sl ? 'down' : 'warn'}">${p.sl ? price(p.sl) : 'FEHLT'}</b></span>`}<span>${!p.tp && p.trail ? 'Trailing ab' : 'TP'}<b class="${p.tp || p.trail ? 'up' : 'muted'}">${p.tp ? price(p.tp) : p.trail ? price(p.trail) : '—'}</b></span></div>
+        ${p.ziel ? `<div class="lbl">Ausstieg: <b>${esc(zielText(p.ziel))}</b></div>` : ''}
         ${ladder(p, slFirst, liqCol)}
         <div class="lbl">Größe ${nf(p.notional || 0)} USDT · Margin ${nf(p.margin || 0)} USDT${p.opened ? ` · offen seit ${timeStr(p.opened)}` : ''}</div>
         ${withBot ? `<a class="pgo" href="#/bot/${encodeURIComponent(p.bot)}">zur ${esc(p.bot)}-Seite ›</a>` : ''}</div>` : ''}`;
@@ -988,4 +994,14 @@ function drawZoneChart(box, c, data) {
     vl.setAttribute('x1', x(i)); vl.setAttribute('x2', x(i)); vl.setAttribute('visibility', 'visible');
     say(`<span>${timeStr(k[0])} · ${data.tf}-Kerze</span><span class="mono">E ${pz(k[1])} · H ${pz(k[2])} · T ${pz(k[3])} · S <b class="${cls(k[4] - k[1])}">${pz(k[4])}</b></span>`);
   }, () => { vl.setAttribute('visibility', 'hidden'); rest(); });
+}
+
+// Ausstieg einer evobot-Papierposition in Worten (Regeln ohne festes TP)
+function zielText(z) {
+  const tag = (ms) => (ms ? new Date(ms).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—');
+  if (z.typ === 'zeit') return `Verkauf nach Haltezeit am ${timeStr(z.ms)}`;
+  if (z.typ === 'trend') return `hält, solange der Trend besteht – raus beim ersten Tagesschluss ${z.seite === -1 ? 'über' : 'unter'} SMA50 oder SMA200`;
+  if (z.typ === 'unlock') return `erster Tagesschluss über SMA10 nach dem Unlock am ${tag(z.tag_ms)}, spätestens ${tag(z.frist_ms)}`;
+  if (z.typ === 'mitte') return 'Take-Profit an der wandernden Mitte';
+  return '—';
 }
