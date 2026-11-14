@@ -7,6 +7,10 @@ let state = null;
 let loading = false;
 const ui = { range: '1M', mode: 'gewinn' };
 let navCount = 0;   // Wechsel innerhalb der App: erst dann fuehrt "Zurueck" per history.back() sicher in die App zurueck
+// Tab-Seiten (Positionen, Alarme, Auswertung, System) zeigen "Zurueck", wenn sie ueber einen Link erreicht wurden
+// (z. B. Alarm-Leiste, Positions-Karte, "System ›") -- ueber die Tab-Leiste nicht, die ist selbst die Navigation.
+let viaTab = false, linkNav = false;
+const linkBack = () => linkNav && navCount > 0;
 
 // Merker je Geraet: eingeklappte Abschnitte, Sortierung der Bots, Erklaertexte, gewaehlter Auswertungs-Bereich
 const pref = (() => { try { return JSON.parse(localStorage.getItem('cockpit.ui') || '{}') || {}; } catch (e) { return {}; } })();
@@ -467,7 +471,7 @@ function viewHome() {
 // Tab Positionen: alle offenen Positionen plus Risiko (Worst Case, Funding, Verteilung)
 function viewPositions() {
   const rows = allPositions();
-  return `${header('Positionen', `${rows.length} offen in ${new Set(rows.map((p) => p.bot)).size} Bots · antippen`)}
+  return `${header('Positionen', `${rows.length} offen in ${new Set(rows.map((p) => p.bot)).size} Bots · antippen`, linkBack())}
   <div class="card" id="allpos"></div>
   ${fold('risk_worst', 'Worst Case', 'alle Stops / BTC-Szenario', `<div class="card" id="worst">${SKEL}</div>`)}
   ${fold('risk_fund', 'Funding-Uhr', 'nächste Zahlung', `<div class="card" id="funding">${SKEL}</div>`)}
@@ -643,7 +647,7 @@ function viewAlerts() {
   };
   const open = ALERT_FOLDS.some((k) => !isFolded(k, ['al_info', 'al_hid', 'al_seen'].includes(k)));
   const n = groupAlerts(live.filter((a) => a.level !== 'info')).length;
-  return `${header('Alarme', `${n} offen${seen.length ? ` · ${groupAlerts(seen).length} gesehen` : ''}${hid.length ? ` · ${hid.length} von ausgeblendeten Bots` : ''}`)}
+  return `${header('Alarme', `${n} offen${seen.length ? ` · ${groupAlerts(seen).length} gesehen` : ''}${hid.length ? ` · ${hid.length} von ausgeblendeten Bots` : ''}`, linkBack())}
   <div class="row" style="justify-content:space-between;align-items:center"><span class="lbl">Gleiche Alarme sind zusammengefasst. „Gesehen“ gilt auf allen Geräten, bis sich etwas ändert.</span>
     <button class="btn ghost sm" id="foldall" type="button" style="flex:none">${open ? 'Alle einklappen' : 'Alle aufklappen'}</button></div>
   ${live.length ? '' : '<div class="ok">Alles in Ordnung – kein offener Alarm.</div>'}
@@ -718,7 +722,7 @@ const curGroup = () => (GROUPS.some(([k]) => k === pref.atab) ? pref.atab : 'erg
 
 function viewStats() {
   const g = curGroup(), nh = hiddenCount();
-  return `${header('Auswertung', `${state.bots.length} angezeigte Bots`)}
+  return `${header('Auswertung', `${state.bots.length} angezeigte Bots`, linkBack())}
   <div class="tabseg" role="tablist" aria-label="Bereich">${GROUPS.map(([k, l]) => `<button type="button" role="tab" data-atab="${k}"
     aria-selected="${k === g}" class="${k === g ? 'on' : ''}">${l}</button>`).join('')}</div>
   ${nh ? `<a class="hint" href="#/system"><span class="grow">Ohne ${nh} ausgeblendete${nh > 1 ? '' : 'n'} Bot${nh > 1 ? 's' : ''}</span><b>ändern ›</b></a>` : ''}
@@ -832,7 +836,7 @@ function viewSystem() {
   };
   const up = s.uptime_s ? `Server läuft seit ${Math.floor(s.uptime_s / 86400)} T ${Math.floor(s.uptime_s % 86400 / 3600)} h` : '';
   const nShown = det.filter((d) => d.shown).length;
-  return `${header('System', up)}
+  return `${header('System', up, linkBack())}
   <h2>Bots im Cockpit <small>${nShown} angezeigt · ${det.length - nShown} ausgeblendet</small></h2>
   <div class="card tight" id="botvis">
     <p class="lbl" style="margin:10px 0 4px;line-height:1.45">Automatisch erkannt: jeder Bot-Ordner auf dem Server mit <span class="mono">secret.json</span>, dazu Papierkonten.
@@ -1258,7 +1262,8 @@ app.addEventListener('touchend', (e) => {
   window.scrollTo(0, 0); render();
 }, { passive: true });
 
-window.addEventListener('hashchange', () => { navCount++; window.scrollTo(0, 0); render(); });
+tabs.addEventListener('click', (e) => { const a = e.target.closest('a'); if (a && a.getAttribute('href') !== (location.hash || '#/')) viaTab = true; });
+window.addEventListener('hashchange', () => { navCount++; linkNav = !viaTab; viaTab = false; window.scrollTo(0, 0); render(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 // Eingabe im Ziel-Formular, Finger auf der Kurve oder eben angetippte Auswahl nicht durch den Auto-Refresh wegwischen
 let lastTouch = 0;
