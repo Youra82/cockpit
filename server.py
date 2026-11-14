@@ -28,6 +28,7 @@ from urllib.parse import parse_qs, urlparse
 
 import ccxt
 
+import activity
 import push
 import zonen
 
@@ -1663,6 +1664,9 @@ def make_handler(app):
                 return self.send_json(app.transfers(q.get('bot'), rng('1M')))
             if url.path == '/api/teams':
                 return self.send_json(app.teams(q.get('bot', '')))
+            if url.path == '/api/activity':
+                act = getattr(app, 'activity', None)
+                return self.send_json(act.snapshot() if act else {'available': False, 'running': [], 'last': []})
             if url.path == '/api/since':
                 try:
                     return self.send_json(app.since(float(q.get('ts', '0'))))
@@ -1830,7 +1834,10 @@ def main():
     poller.pusher = push.Pusher(DATA, cfg['push_contact'], cfg['timezone_offset_hours'])
     poller.build_state()
     poller.start()
+    act = activity.Activity(lambda: poller.all_bots)   # was der Server gerade fuer die Bots tut (Prozessliste, nur lesen)
+    act.start()
     app = App(cfg, store, poller)
+    app.activity = act
     httpd = ThreadingHTTPServer((cfg['host'], cfg['port']), make_handler(app))
     log.info('Bot-Cockpit läuft auf http://%s:%s', cfg['host'], cfg['port'])
     httpd.serve_forever()

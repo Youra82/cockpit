@@ -1040,3 +1040,108 @@ function drawYear(box, days) {
     info.innerHTML = `<span>${dstr(c.dt)} ${c.dt.getFullYear()}</span><span>${c.v == null ? 'kein Trade geschlossen' : `<b class="${cls(c.v)}">${signed(c.v)} USDT</b>`} · Woche <b class="${cls(sums[Math.floor(e.target.dataset.i / 7)])}">${signed(sums[Math.floor(e.target.dataset.i / 7)])}</b></span>`;
   });
 }
+// ------------------------------------------------------------------ KPI im Zeitverlauf (Detailseite einer Kennzahl-Kachel)
+const KPI = {
+  win: { t: 'Trefferquote', ref: 50, good: (v) => v >= 50, q: 'Anteil der Trades, die im Plus geschlossen wurden. Allein sagt das wenig – zusammen mit Ø Gewinn und Ø Verlust ergibt sich, ob ein Bot verdient.' },
+  pf: { t: 'Profitfaktor', ref: 1, good: (v) => v >= 1, q: 'Summe aller Gewinne geteilt durch Summe aller Verluste. Über 1 verdient der Bot unterm Strich, unter 1 verliert er.' },
+  avgwin: { t: 'Ø Gewinn', good: () => true, q: 'Durchschnittlicher Gewinn eines Gewinn-Trades in USDT (nach Gebühren und Funding).' },
+  avgloss: { t: 'Ø Verlust', good: () => false, q: 'Durchschnittlicher Verlust eines Verlust-Trades in USDT. Je näher an 0, desto besser.' },
+  dd: { t: 'Rückgang vom Höchststand', ref: 0, good: (v) => v > -10, q: 'Wie weit die Kurve unter ihrem bisherigen Höchststand liegt. 0 % = neuer Höchststand.' },
+  hold: { t: 'Ø Haltedauer', good: () => true, q: 'Wie lange ein Trade im Schnitt offen ist, vom Einstieg bis zum Ausstieg.' },
+};
+const holdFmt = (h) => (h == null ? '–' : h < 2 ? `${nf(h * 60, 0)} min` : h < 48 ? `${nf(h, 1)} h` : `${nf(h / 24, 1)} T`);
+const kpiFmt = (m, v) => (v == null ? '–' : m === 'win' ? `${nf(v, 0)} %` : m === 'pf' ? (v >= 99 ? '∞' : nf(v, 2)) : m === 'dd' ? `${nf(v, 1)} %`
+  : m === 'hold' ? holdFmt(v) : signed(v));
+// Wert einer Kennzahl fuer eine Menge Trades
+function kpiValue(m, tr) {
+  if (!tr.length) return null;
+  const w = tr.filter((t) => t.net > 0), l = tr.filter((t) => t.net <= 0);
+  const sw = w.reduce((s, t) => s + t.net, 0), sl = l.reduce((s, t) => s + t.net, 0);
+  if (m === 'win') return w.length / tr.length * 100;
+  if (m === 'pf') return sl < 0 ? Math.min(99, sw / -sl) : (sw > 0 ? 99 : null);
+  if (m === 'avgwin') return w.length ? sw / w.length : null;
+  if (m === 'avgloss') return l.length ? sl / l.length : null;
+  if (m === 'hold') return tr.reduce((s, t) => s + (t.utime - t.ctime), 0) / tr.length / 3.6e6;
+  return null;
+}
+const weekStart = (ms) => { const d = new Date(ms); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.getTime(); };
+const isoWeek = (ms) => { const d = new Date(ms); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + 3 - ((d.getDay() + 6) % 7)); const y = new Date(d.getFullYear(), 0, 4); return 1 + Math.round(((d - y) / 864e5 - 3 + ((y.getDay() + 6) % 7)) / 7); };
+
+function drawKpiDetail(box, m, trades, pts) {
+  const K = KPI[m], t0 = pts && pts.length ? pts[0].t * 1000 : 0;
+  const tr = (trades || []).filter((t) => t.utime >= t0).sort((a, b) => a.utime - b.utime);
+  // Verlauf: gleitend ueber die letzten N Trades (bzw. Rueckgang direkt aus der Kurve)
+  let series = [], N = 0;
+  if (m === 'dd') {
+    let peak = -Infinity;
+    series = (pts || []).map((p) => { peak = Math.max(peak, p.v); return { t: p.t * 1000, v: peak > 0 ? (p.v / peak - 1) * 100 : 0 }; });
+  } else {
+    const pool = m === 'avgwin' ? tr.filter((t) => t.net > 0) : m === 'avgloss' ? tr.filter((t) => t.net <= 0) : tr;
+    N = Math.max(5, Math.min(20, Math.round(pool.length / 4)));
+    series = pool.map((t, i) => (i + 1 < Math.min(N, 5) ? null : { t: t.utime, v: kpiValue(m, pool.slice(Math.max(0, i - N + 1), i + 1)) }))
+      .filter((p) => p && p.v != null);
+  }
+  // Je Woche
+  const wk = new Map();
+  (m === 'dd' ? series : tr).forEach((x) => { const k = weekStart(m === 'dd' ? x.t : x.utime); if (!wk.has(k)) wk.set(k, []); wk.get(k).push(x); });
+  const weeks = [...wk.entries()].sort((a, b) => a[0] - b[0]).map(([k, xs]) => ({ k, n: m === 'dd' ? null : xs.length,
+    v: m === 'dd' ? Math.min(...xs.map((p) => p.v)) : kpiValue(m, xs) }));
+  if (series.length < 2 && !weeks.length) return tooFew(box, 'Zu wenige Trades in diesem Zeitraum.');
+  const cur = m === 'dd' ? series[series.length - 1]?.v : kpiValue(m, tr);
+  box.innerHTML = `<div class="kpihead"><span class="lbl">${m === 'dd' ? 'Jetzt' : `Im Zeitraum (${tr.length} Trades)`}</span>
+      <b class="mono ${m === 'hold' ? '' : K.good(cur ?? 0) ? 'up' : 'down'}">${kpiFmt(m, cur)}</b></div>
+    <p class="q">${K.q}</p>
+    <h3 class="psub">Verlauf ${m === 'dd' ? '' : `· gleitend über die letzten ${N} ${m === 'avgwin' ? 'Gewinn-' : m === 'avgloss' ? 'Verlust-' : ''}Trades`}</h3>
+    <div id="kpiline"></div><h3 class="psub">Je Woche</h3><div id="kpibars"></div><div class="card tight" id="kpitab" style="margin-top:8px"></div>`;
+  const fmtV = (v) => kpiFmt(m, v);
+  // --- Linie mit Finger-Anzeige
+  const lb = box.querySelector('#kpiline');
+  if (series.length >= 2) {
+    const { svg, say } = chartShell(lb, 170, `${K.t} im Verlauf`);
+    const vs = series.map((p) => Math.min(p.v, m === 'pf' ? 5 : p.v));
+    let lo = Math.min(...vs, K.ref ?? Infinity), hi = Math.max(...vs, K.ref ?? -Infinity);
+    if (hi - lo < 1e-9) { lo -= 1; hi += 1; }
+    const X0 = 40, X1 = 352, Y0 = 8, Y1 = 146, n = series.length;
+    const x = (i) => X0 + i / (n - 1) * (X1 - X0), y = (v) => Y0 + (1 - (Math.min(v, m === 'pf' ? 5 : v) - lo) / (hi - lo)) * (Y1 - Y0);
+    niceTicks(lo, hi, 3).forEach((v) => { svgEl('line', { x1: X0, x2: X1, y1: y(v), y2: y(v), class: 'grid' }, svg); svgText(svg, X0 - 5, y(v) + 3, m === 'hold' ? holdFmt(v) : nf(v, m === 'pf' ? 1 : 0), 'end'); });
+    if (K.ref != null && K.ref >= lo && K.ref <= hi) svgEl('line', { x1: X0, x2: X1, y1: y(K.ref), y2: y(K.ref), class: 'zero' }, svg);
+    const col = cssVar(m === 'avgloss' || m === 'dd' ? '--down' : m === 'hold' || m === 'avgwin' ? (m === 'avgwin' ? '--up' : '--accent') : '--accent');
+    const d = series.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(p.v).toFixed(1)}`).join(' ');
+    if (m === 'dd') svgEl('path', { d: `${d} L${X1} ${y(0)} L${X0} ${y(0)} Z`, fill: col, 'fill-opacity': 0.15 }, svg);
+    svgEl('path', { d, fill: 'none', stroke: col, 'stroke-width': 2, 'stroke-linejoin': 'round' }, svg);
+    svgEl('circle', { cx: X1, cy: y(series[n - 1].v), r: 3.5, fill: col }, svg);
+    svgText(svg, X0, 164, dayStr(series[0].t)); svgText(svg, (X0 + X1) / 2, 164, dayStr(series[Math.floor(n / 2)].t), 'middle'); svgText(svg, X1, 164, 'heute', 'end');
+    const vl = svgEl('line', { y1: Y0, y2: Y1, class: 'cursor', visibility: 'hidden' }, svg);
+    const dot = svgEl('circle', { r: 4.5, class: 'cursordot', visibility: 'hidden' }, svg);
+    const rest = () => say(`<span>${K.t} ${m === 'dd' ? 'im Verlauf' : 'gleitend'} · aktuell <b>${fmtV(series[n - 1].v)}</b></span><span>Finger über die Linie zeigt den Wert an jedem Tag.</span>`);
+    rest();
+    scrubX(svg, n, X0, X1, (i) => {
+      vl.setAttribute('x1', x(i)); vl.setAttribute('x2', x(i)); vl.setAttribute('visibility', 'visible');
+      dot.setAttribute('cx', x(i)); dot.setAttribute('cy', y(series[i].v)); dot.setAttribute('visibility', 'visible');
+      say(`<span>${timeStr(series[i].t)}</span><span>${K.t}: <b>${fmtV(series[i].v)}</b>${m === 'dd' ? '' : ` (letzte ${N} Trades bis hier)`}</span>`);
+    }, () => { vl.setAttribute('visibility', 'hidden'); dot.setAttribute('visibility', 'hidden'); rest(); });
+  } else lb.innerHTML = '<div class="empty">Zu wenige Trades für einen Verlauf.</div>';
+  // --- Balken je Woche
+  const bb = box.querySelector('#kpibars'), wv = weeks.filter((w) => w.v != null);
+  if (wv.length) {
+    const svg = svgEl('svg', { class: 'viz', viewBox: '0 0 360 120', role: 'img', 'aria-label': `${K.t} je Woche` });
+    bb.appendChild(svg);
+    const vals = wv.map((w) => Math.min(w.v, m === 'pf' ? 5 : w.v)), base = K.ref != null && m !== 'dd' ? K.ref : 0;
+    const lo = Math.min(0, base, ...vals), hi = Math.max(0, base, ...vals) || 1;
+    const X0 = 8, X1 = 352, Y0 = 6, Y1 = 98, bw = (X1 - X0) / wv.length;
+    const y = (v) => Y0 + (1 - (v - lo) / (hi - lo || 1)) * (Y1 - Y0);
+    svgEl('line', { x1: X0, x2: X1, y1: y(base), y2: y(base), class: 'zero' }, svg);
+    wv.forEach((w, i) => {
+      const v = Math.min(w.v, m === 'pf' ? 5 : w.v), good = K.good(w.v);
+      svgEl('rect', { x: X0 + i * bw + bw * 0.15, width: Math.max(2, bw * 0.7), y: Math.min(y(v), y(base)), height: Math.max(1.5, Math.abs(y(v) - y(base))),
+        rx: 2, fill: cssVar(m === 'hold' ? '--accent' : good ? '--up' : '--down') }, svg);
+    });
+    svgText(svg, X0, 116, `KW ${isoWeek(wv[0].k)}`); svgText(svg, X1, 116, `KW ${isoWeek(wv[wv.length - 1].k)}`, 'end');
+    if (K.ref != null && m !== 'dd') svgText(svg, X1, y(base) - 3, `${m === 'win' ? '50 %' : '1,0'}`, 'end');
+  } else bb.innerHTML = '<div class="empty">Keine Wochenwerte.</div>';
+  // --- Tabelle je Woche (neueste zuerst)
+  const rows = weeks.slice().reverse().map((w) => `<div class="li"><span style="width:96px">KW ${isoWeek(w.k)} · ${dayStr(w.k)}</span>
+    <span class="grow muted">${w.n != null ? `${w.n} Trade${w.n === 1 ? '' : 's'}` : 'tiefster Stand'}</span>
+    <b class="mono ${w.v == null ? 'muted' : m === 'hold' ? '' : K.good(w.v) ? 'up' : 'down'}">${fmtV(w.v)}</b></div>`);
+  box.querySelector('#kpitab').innerHTML = rows.length ? moreList(rows, 6) : '<div class="empty">Keine Wochen.</div>';
+}

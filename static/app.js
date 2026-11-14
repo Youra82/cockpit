@@ -317,7 +317,7 @@ function drawTeamList(box, teams, trades) {
 }
 
 // Kennzahlen je Bot im Zeitraum der Kurve: Trefferquote, Ø Gewinn/Verlust, Profitfaktor, Rueckgang, Haltedauer
-function drawKpis(box, trades, pts) {
+function drawKpis(box, trades, pts, bot) {
   const t0 = pts && pts.length ? pts[0].t * 1000 : 0;
   const tr = (trades || []).filter((t) => t.utime >= t0);
   if (!tr.length) { box.innerHTML = '<div class="empty">Keine geschlossenen Trades in diesem Zeitraum.</div>'; return; }
@@ -329,15 +329,27 @@ function drawKpis(box, trades, pts) {
   const hold = tr.reduce((s, t) => s + (t.utime - t.ctime), 0) / tr.length / 60000;
   const holdTxt = hold < 120 ? `${nf(hold, 0)} min` : hold < 2880 ? `${nf(hold / 60, 1)} h` : `${nf(hold / 1440, 1)} T`;
   const days = Math.max(1, (Date.now() - Math.max(t0, Math.min(...tr.map((t) => t.utime)))) / 864e5);
-  const tile = (l, v, sub, c = '') => `<div class="kpi"><span class="lbl">${l}</span><b class="mono ${c}">${v}</b><small>${sub}</small></div>`;
+  // Jede Kachel oeffnet ihre Detailseite mit Verlauf ueber die Zeit (#/kpi/<bot>/<kennzahl>)
+  const tile = (key, l, v, sub, c = '') => `<a class="kpi" href="#/kpi/${encodeURIComponent(bot)}/${key}" aria-label="${l}: Verlauf anzeigen">
+    <span class="lbl">${l}${icon.chev}</span><b class="mono ${c}">${v}</b><small>${sub}</small></a>`;
   box.innerHTML = `<div class="kpis">
-    ${tile('Trefferquote', `${Math.round(w.length / tr.length * 100)} %`, `${w.length} von ${tr.length} im Plus`, w.length / tr.length >= 0.5 ? 'up' : '')}
-    ${tile('Profitfaktor', pf == null ? '∞' : nf(pf, 2), 'Gewinne ÷ Verluste', pf == null || pf >= 1 ? 'up' : 'down')}
-    ${tile('Ø Gewinn', w.length ? signed(sw / w.length) : '–', 'je Gewinn-Trade', 'up')}
-    ${tile('Ø Verlust', l.length ? signed(sl / l.length) : '–', 'je Verlust-Trade', 'down')}
-    ${tile('Größter Rückgang', `${nf(dd, 1)} %`, 'vom Höchststand der Kurve', dd < -20 ? 'down' : dd < -10 ? 'warn' : '')}
-    ${tile('Ø Haltedauer', holdTxt, `${nf(tr.length / days * 7, 1)} Trades je Woche`)}
-  </div><span class="lbl">Zeitraum wie die Kurve oben (${pts && pts.length ? `ab ${dShort(pts[0].t)}` : '90 Tage'}).</span>`;
+    ${tile('win', 'Trefferquote', `${Math.round(w.length / tr.length * 100)} %`, `${w.length} von ${tr.length} im Plus`, w.length / tr.length >= 0.5 ? 'up' : '')}
+    ${tile('pf', 'Profitfaktor', pf == null ? '∞' : nf(pf, 2), 'Gewinne ÷ Verluste', pf == null || pf >= 1 ? 'up' : 'down')}
+    ${tile('avgwin', 'Ø Gewinn', w.length ? signed(sw / w.length) : '–', 'je Gewinn-Trade', 'up')}
+    ${tile('avgloss', 'Ø Verlust', l.length ? signed(sl / l.length) : '–', 'je Verlust-Trade', 'down')}
+    ${tile('dd', 'Größter Rückgang', `${nf(dd, 1)} %`, 'vom Höchststand der Kurve', dd < -20 ? 'down' : dd < -10 ? 'warn' : '')}
+    ${tile('hold', 'Ø Haltedauer', holdTxt, `${nf(tr.length / days * 7, 1)} Trades je Woche`)}
+  </div><span class="lbl">Zeitraum wie die Kurve oben (${pts && pts.length ? `ab ${dShort(pts[0].t)}` : '90 Tage'}). Kachel antippen zeigt den Verlauf.</span>`;
+}
+
+// Detailseite einer Kennzahl: Verlauf, Wochenbalken, Wochentabelle -- Zeitraum wie die Kurve (umschaltbar)
+function viewKpi(bot, key) {
+  const b = state.bots.find((x) => x.name === bot), K = KPI[key];
+  if (!b || !K) return header('Nicht gefunden', '', true);
+  return `${header(K.t, `<span class="dot on" style="display:inline-block;width:8px;height:8px;margin-right:6px;background:${botColor(bot)}"></span>${esc(bot)} · Kennzahl im Verlauf`, true)}
+  <div class="card">${chartControls()}<div id="kpibox">${SKEL}</div></div>
+  <div class="seg wrap kpinav" role="group" aria-label="Andere Kennzahl">${Object.entries(KPI).map(([k, v]) =>
+    `<a href="#/kpi/${encodeURIComponent(bot)}/${k}" class="${k === key ? 'on' : ''}" ${k === key ? 'aria-current="page"' : ''}>${v.t.replace('Rückgang vom Höchststand', 'Rückgang')}</a>`).join('')}</div>`;
 }
 
 // Margin-Auslastung: wie viel vom Konto steckt in offenen Positionen (Summe der Margin / Kontostand)
@@ -367,6 +379,43 @@ function drawSince(box, d) {
     <button type="button" class="calx" data-sinceclose aria-label="Ausblenden">✕</button></div>
     <span class="lbl">${ago(d.ts)} · ${timeStr(d.ts * 1000)}</span>
     ${lines.length ? lines.join('') : '<div class="muted">Nichts Neues – keine Trades, Alarme oder Teamwechsel.</div>'}</div>`;
+}
+
+// Was der Server gerade fuer die Bots tut (Prozessliste des Servers, /api/activity)
+const ACT = { trade: ['Trades', '--up'], opt: ['Optimierung', '--accent'], bt: ['Backtest', '--b4'], check: ['Live-Check', '--b6'],
+  update: ['Update', '--warn'], data: ['Daten', '--muted'], scan: ['Suche', '--b3'], report: ['Bericht', '--muted'], other: ['läuft', '--muted'] };
+const ACT_ORDER = ['opt', 'bt', 'scan', 'update', 'check', 'trade', 'data', 'report', 'other'];   // wichtigste zuerst
+const durTxt = (s) => (s < 60 ? `${Math.max(1, Math.round(s))} s` : s < 7200 ? `${Math.round(s / 60)} min` : `${nf(s / 3600, 1)} h`);
+const actOf = (a, bot) => (a?.running || []).filter((g) => g.bot === bot).sort((x, y) => ACT_ORDER.indexOf(x.kind) - ACT_ORDER.indexOf(y.kind));
+function actRow(g, done) {
+  const [, col] = ACT[g.kind] || ACT.other;
+  const meta = done ? `${ago(g.end)} · Dauer ${durTxt(g.secs)}`
+    : `seit ${durTxt(Date.now() / 1000 - g.start)}${g.cpu ? ` · ${g.cpu} % CPU` : ''}${g.n > 1 ? ` · ${g.n} Prozesse` : ''}`;
+  return `<div class="actrow"><i class="actdot${done ? '' : ' live'}" style="background:var(${col})"></i>
+    <span class="grow"><b style="color:${botColor(g.bot)}">${esc(g.bot)}</b> · ${esc(g.text)}<small>${meta}${g.kind === 'other' || done ? '' : ` · ${esc(g.script)}`}</small></span></div>`;
+}
+// Uebersicht: Karte nur, solange etwas laeuft
+function drawActivityCard(box, a) {
+  if (!a || !a.running || !a.running.length) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div class="card actcard"><div class="row2"><b><i class="actdot live" style="background:var(--accent)"></i> Server arbeitet gerade</b>
+    <a class="lbl" href="#/system" data-foldopen="sys_act">Verlauf ›</a></div>${a.running.map((g) => actRow(g)).join('')}</div>`;
+}
+// System: laufende Skripte + letzter Lauf je Bot und Skript
+function drawActivity(box, a) {
+  if (!a || !a.available) { box.innerHTML = '<div class="empty">Prozessliste nicht verfügbar (psutil fehlt – bash update.sh ausführen).</div>'; return; }
+  box.innerHTML = `<h3 class="psub" style="margin-top:4px">Läuft gerade</h3>
+    ${a.running.length ? a.running.map((g) => actRow(g)).join('') : '<div class="lbl">Gerade läuft kein Bot-Skript.</div>'}
+    <h3 class="psub">Zuletzt</h3>
+    ${a.last.length ? moreList(a.last.map((g) => actRow(g, true)), 6) : '<div class="lbl">Seit dem Start des Cockpits noch nichts beendet.</div>'}
+    <span class="lbl">Der Server schaut alle 5 Sekunden in seine Prozessliste (nur lesen) und ordnet laufende Skripte dem Bot-Ordner zu:
+      Masterrunner = Trades prüfen/platzieren, Optimierer/Pipeline = Portfolio-Optimierung, Backtest, Live-Check, Update.</span>`;
+}
+// Markierung an der Bot-Zeile bzw. im Kopf der Bot-Seite
+function actPill(a, bot) {
+  const g = actOf(a, bot)[0];
+  if (!g) return '';
+  const [l, col] = ACT[g.kind] || ACT.other;
+  return `<span class="pill act" style="color:var(${col})"><i class="actdot live" style="background:var(${col})"></i>${esc(l)}</span>`;
 }
 
 // Mini-Kurve je Bot (7 Tage) fuer die Bot-Zeilen der Uebersicht
@@ -515,7 +564,7 @@ function botRow(b) {
   const npos = b.paper ? (b.paper.open || []).length : b.positions.length;
   return `<a class="bot${b.paper ? ' paper' : ''}" href="#/bot/${encodeURIComponent(b.name)}" style="--bc:${botColor(b.name)}">
     <span class="dot ${b.running ? 'on' : 'off'}" aria-hidden="true"></span>
-    <div class="t"><b>${esc(b.name)}${botAlarm(b.name)}</b><span>${status}</span>
+    <div class="t"><b>${esc(b.name)}${botAlarm(b.name)}<span data-act="${esc(b.name)}"></span></b><span>${status}</span>
       ${has ? `<span>${nf(b.equity)} USDT · ${npos} Pos.</span>` : ''}</div>
     ${b.paper ? '' : `<span class="spark" data-spark="${esc(b.name)}"></span>`}
     <div class="r pnl3">${val('realisiert', real, 'r')}${val('offen', open, 'o')}${val('zus.', real + open, 'z')}</div>${icon.chev}</a>`;
@@ -526,6 +575,7 @@ function viewHome() {
   const bots = sortedBots(state.bots.filter((b) => !b.paper)), paper = state.bots.filter((b) => b.paper);
   const nh = hiddenCount();
   return `${header('Bot-Cockpit', `Bitget · ${freshHtml(offline)}`)}
+  <div id="actbox"></div>
   ${showSince() ? `<div id="sincebox">${SKEL}</div>` : ''}
   ${alertBar()}
   <div class="card" id="capcard">
@@ -937,6 +987,7 @@ function viewSystem() {
   const up = s.uptime_s ? `Server läuft seit ${Math.floor(s.uptime_s / 86400)} T ${Math.floor(s.uptime_s % 86400 / 3600)} h` : '';
   const nShown = det.filter((d) => d.shown).length;
   return `${header('System', up, linkBack())}
+  ${fold('sys_act', 'Was der Server gerade macht', 'Masterrunner · Optimierung · Backtest', `<div class="card" id="actlist">${SKEL}</div>`)}
   <h2>Bots im Cockpit <small>${nShown} angezeigt · ${det.length - nShown} ausgeblendet</small></h2>
   <div class="card tight" id="botvis">
     <p class="lbl" style="margin:10px 0 4px;line-height:1.45">Automatisch erkannt: jeder Bot-Ordner auf dem Server mit <span class="mono">secret.json</span>, dazu Papierkonten.
@@ -1142,14 +1193,14 @@ function route() {
   const h = location.hash.replace(/^#/, '') || '/';
   const parts = h.split('/').filter(Boolean);
   const name = parts[0] === 'server' ? 'system' : parts[0] || 'home';   // alter Link #/server fuehrt zu System
-  return { name, arg: parts[1] ? decodeURIComponent(parts[1]) : null };
+  return { name, arg: parts[1] ? decodeURIComponent(parts[1]) : null, arg2: parts[2] ? decodeURIComponent(parts[2]) : null };
 }
 
 async function render() {
   if (!state) return;
   const r = route();
   tabs.hidden = false;
-  const tab = { bot: 'home', trade: 'home', zonen: 'auswertung' }[r.name] || r.name;
+  const tab = { bot: 'home', trade: 'home', kpi: 'home', zonen: 'auswertung' }[r.name] || r.name;
   for (const a of tabs.querySelectorAll('a')) a.classList.toggle('on', a.dataset.tab === tab);
   const badge = document.getElementById('badge');
   const crit = groupAlerts(liveAlerts().filter((a) => a.level !== 'info')).length;
@@ -1157,7 +1208,7 @@ async function render() {
 
   const html = r.name === 'bot' ? viewBot(r.arg) : r.name === 'trade' ? viewTrade(r.arg) : r.name === 'alarme' ? viewAlerts()
     : r.name === 'auswertung' ? viewStats() : r.name === 'system' ? viewSystem() : r.name === 'zonen' ? viewZones()
-      : r.name === 'positionen' ? viewPositions() : viewHome();
+      : r.name === 'positionen' ? viewPositions() : r.name === 'kpi' ? viewKpi(r.arg, r.arg2) : viewHome();
   app.innerHTML = html;
   updateMinibar();
   flashChanges();
@@ -1194,6 +1245,11 @@ async function render() {
   if (bp) { const bb = state.bots.find((x) => x.name === r.arg); drawPositions(bp, (bb.paper ? bb.paper.positions || [] : bb.positions).map((p) => ({ ...p, bot: bb.name })), false, 5); }
   try {
     if (r.name === 'home') {
+      // Was der Server gerade tut: Karte oben + Markierung an den Bot-Zeilen
+      api('/api/activity').then((a) => {
+        const ab = document.getElementById('actbox'); if (ab) drawActivityCard(ab, a);
+        app.querySelectorAll('[data-act]').forEach((s) => { s.innerHTML = actPill(a, s.dataset.act); });
+      }).catch(() => {});
       const sbx = document.getElementById('sincebox');
       if (sbx) cachedApi(`/api/since?ts=${sinceTs}`, 60000).then((d) => { if (sbx.isConnected) drawSince(sbx, d); }).catch(() => sbx.remove());
       // Kurve + Markierungen (Trades, Ein-/Auszahlungen, heute inkl. offen) und Mini-Kurven je Bot
@@ -1223,12 +1279,22 @@ async function render() {
       const c = document.getElementById('botchart'); if (c) { c.innerHTML = chartWithSummary(pts, ex); bindScrub(c, pts, ex); }
       const ti = document.getElementById('teaminfo'); if (ti) showTeam(ti, teams, null, ex.teamTrades);
       const tl = document.getElementById('teamlist'); if (tl) drawTeamList(tl, teams, ex.teamTrades);
-      const kp = document.getElementById('botkpi'); if (kp) drawKpis(kp, ex.trades, pts);
+      const kp = document.getElementById('botkpi'); if (kp) drawKpis(kp, ex.trades, pts, r.arg);
       const t = document.getElementById('bottrades'); if (t) t.innerHTML = tradeRows(st.trades, false);
       const k = document.getElementById('botcoins'); if (k) drawCoins(k, trades, r.arg);
       const fe = document.getElementById('botfees'); if (fe) drawFees(fe, trades.filter((x) => x.bot === r.arg));
       // Note immer ueber die letzten 30 Tage, unabhaengig vom gewaehlten Startdatum
-      const ch = document.getElementById('botchips'); if (ch) drawBotChips(ch, b, tradesAll, race, reports);
+      const ch = document.getElementById('botchips');
+      if (ch) {
+        drawBotChips(ch, b, tradesAll, race, reports);
+        // Laeuft gerade etwas fuer diesen Bot (Masterrunner, Optimierung, Backtest ...)?
+        api('/api/activity').then((a) => { const g = actOf(a, b.name)[0]; if (g && ch.isConnected) ch.insertAdjacentHTML('afterbegin', `<span class="chip">${actPill(a, b.name)} seit ${durTxt(Date.now() / 1000 - g.start)}</span>`); }).catch(() => {});
+      }
+    } else if (r.name === 'kpi') {
+      // Kennzahl im Verlauf: Kurve des Bots (fuer Rueckgang und Zeitraum) + Trades des Bots
+      const [pts, trades] = await Promise.all([eq(r.arg), cachedApi('/api/trades?x=1' + fromQ())]);
+      const kb = document.getElementById('kpibox');
+      if (kb && KPI[r.arg2]) drawKpiDetail(kb, r.arg2, trades.filter((x) => x.bot === r.arg), pts);
     } else if (r.name === 'trade') {
       const box = document.getElementById('tradechart');
       const t = await api(`/api/trade?pid=${encodeURIComponent(r.arg)}`);
@@ -1241,6 +1307,8 @@ async function render() {
       if (el) drawZones(el, z);
       if (z.laedt) setTimeout(() => { if (route().name === 'zonen') render(); }, 15000);
     } else if (r.name === 'system') {
+      const al = document.getElementById('actlist');
+      if (al) api('/api/activity').then((a) => { if (al.isConnected) drawActivity(al, a); }).catch(() => { al.innerHTML = ''; });
       const pb = document.getElementById('pushbox');
       if (pb) pushPanel(pb).catch((e) => { pb.innerHTML = `<div class="empty">Mitteilungen nicht verfügbar (${esc(e.message)}).</div>`; });
       const sb = document.getElementById('siribox'); if (sb) await siriPanel(sb);
