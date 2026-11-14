@@ -383,3 +383,81 @@ h2 .h2r { display: flex; align-items: center; gap: 8px; }
 .minibar .pill { margin-left: auto; }
 @media (prefers-reduced-motion: reduce) { .minibar { transition: none; } }
 .tabseg { top: calc(env(safe-area-inset-top) + 52px); }
+/* --- Runde 3: Grafiken --- */
+/* Achsen besser lesbar */
+.yaxis { font-size: 11px; color: var(--muted); }
+svg.viz text { font-size: 10.5px; fill: var(--muted); }
+.xaxis { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); margin-top: -4px; }
+.cdiff { font-size: 12.5px; text-align: center; }
+.clegend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); }
+.clegend span { display: inline-flex; align-items: center; gap: 5px; }
+.clegend .lg { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.clegend .lg.up { background: var(--up); } .clegend .lg.down { background: var(--down); }
+.clegend .lgf { color: var(--accent); font-size: 12px; }
+.clegend .lgd { width: 16px; border-top: 2px dashed var(--accent); display: inline-block; }
+/* Markierungen auf der Kapitalkurve (HTML, damit sie rund bleiben) */
+.scrub .tdot { position: absolute; width: var(--s, 6px); height: var(--s, 6px); margin: calc(var(--s, 6px) / -2) 0 0 calc(var(--s, 6px) / -2); border-radius: 50%; box-shadow: 0 0 0 1.5px var(--card); pointer-events: none; }
+.scrub .tdot.up { background: var(--up); } .scrub .tdot.down { background: var(--down); }
+.scrub .tflag { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed var(--accent); pointer-events: none; }
+.scrub .tflag b { position: absolute; top: -2px; left: 3px; font-size: 10px; font-weight: 700; color: var(--accent); background: var(--card); padding: 0 3px; border-radius: 4px; white-space: nowrap; }
+.scrub .hlring { position: absolute; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; border-radius: 50%; border: 1.5px solid var(--text); pointer-events: none; }
+.scrub .hllab { position: absolute; font-size: 10px; font-weight: 700; color: var(--text); white-space: nowrap; pointer-events: none; transform: translate(6px, -14px); background: rgba(22, 26, 33, .85); padding: 0 3px; border-radius: 4px; }
+.scrub .hllab.t { transform: translate(6px, 4px); }
+.scrub .hllab.r { transform: translate(calc(-100% - 6px), -14px); }
+.scrub .hllab.t.r { transform: translate(calc(-100% - 6px), 4px); }
+.stip small + small { margin-top: 1px; }
+/* Mini-Kurve je Bot */
+.bot { gap: 8px; }
+.bot .spark { width: 48px; height: 28px; flex: none; }
+.bot .spark svg { width: 48px; height: 28px; display: block; }
+/* Aufleuchten bei Aenderung */
+.flash { animation: flashup 1.8s ease-out; border-radius: 6px; }
+.flash.fdown { animation-name: flashdown; }
+@keyframes flashup { 0% { background: rgba(63, 191, 128, .45); box-shadow: 0 0 0 3px rgba(63, 191, 128, .45); } 100% { background: transparent; box-shadow: 0 0 0 3px transparent; } }
+@keyframes flashdown { 0% { background: rgba(242, 118, 127, .45); box-shadow: 0 0 0 3px rgba(242, 118, 127, .45); } 100% { background: transparent; box-shadow: 0 0 0 3px transparent; } }
+@media (prefers-reduced-motion: reduce) { .flash { animation: none; } }
+/* Wo mein Geld steckt: Balken je Coin */
+.lsbar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; gap: 2px; margin-bottom: 4px; }
+.erow { display: grid; grid-template-columns: 52px minmax(0, 1fr) minmax(0, 1fr) 52px; gap: 6px; align-items: center; width: 100%; min-height: 32px; padding: 3px 4px; background: none; border: 0; border-radius: 8px; color: var(--text); font-family: inherit; font-size: 12.5px; text-align: left; cursor: pointer; }
+.erow.on { background: var(--soft); }
+.erow.ehead { font-size: 10.5px; color: var(--muted); cursor: default; min-height: 0; }
+.erow.ehead span:nth-child(2) { text-align: right; }
+.erow .mono { text-align: right; color: var(--muted); }
+.eh { height: 12px; position: relative; }
+.eh.l { border-left: 1px solid #2A3140; }
+.eh i { position: absolute; top: 0; bottom: 0; border-radius: 3px; }
+.eh.s i { right: 0; background: var(--down); }
+.eh.l i { left: 0; background: var(--up); }
+/* Positionen: Weg vom Stop zum Ziel */
+.ptrack { position: relative; height: 10px; border-radius: 5px; background: var(--line); margin: 0 6px; }
+.ptrack .pfill { position: absolute; top: 0; bottom: 0; border-radius: 5px; }
+.ptrack .pfill.up { background: rgba(63, 191, 128, .6); } .ptrack .pfill.down { background: rgba(242, 118, 127, .6); }
+.ptrack .pent { position: absolute; top: -4px; bottom: -4px; width: 2px; margin-left: -1px; background: var(--muted); }
+.ptrack .pcur { position: absolute; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: var(--text); box-shadow: 0 0 0 2.5px var(--card); }
+.ptrack .popen { position: absolute; right: -6px; top: -1px; bottom: -1px; width: 14px; background: linear-gradient(90deg, transparent, var(--card)); }
+.psay { grid-column: 1 / -1; font-size: 11.5px; font-weight: 600; margin-top: -2px; }
+.psay.up { color: var(--up); } .psay.down { color: var(--down); }
+/* 26 Wochen */
+.yr { display: grid; grid-template-rows: repeat(7, minmax(0, 1fr)); grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 2px; }
+.yr i { aspect-ratio: 1; border-radius: 2px; cursor: pointer; }
+.yrw { display: grid; grid-template-columns: repeat(26, minmax(0, 1fr)); gap: 2px; height: 40px; margin-top: 6px; }
+.yrw span { position: relative; }
+.yrw i { position: absolute; left: 0; right: 0; border-radius: 1px; }
+.yrw i.p { bottom: 50%; background: var(--up); } .yrw i.n { top: 50%; background: var(--down); }
+.yrm { display: grid; grid-template-columns: repeat(26, minmax(0, 1fr)); gap: 2px; font-size: 10.5px; color: var(--muted); }
+.yrm span { white-space: nowrap; }
+/* Rueckmeldung beim Antippen */
+.bot, .poscard, .zlink, .hint, .li, .btn, .erow, .prow, .tabseg button, .seg button, .round { transition: transform .1s ease, background-color .1s ease; }
+.bot:active, .poscard:active, .zlink:active, .hint:active, .erow:active { transform: scale(.975); background-color: var(--soft); }
+.li:active, .prow:active { background-color: var(--soft); }
+.btn:active, .tabseg button:active, .seg button:active, .round:active, .showmore:active { transform: scale(.95); }
+@media (prefers-reduced-motion: reduce) { .bot:active, .poscard:active, .zlink:active, .hint:active, .erow:active, .btn:active, .tabseg button:active, .seg button:active, .round:active { transform: none; } }
+/* Startbild bis zum ersten Abruf */
+.splash { min-height: 80vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; }
+.splash img { width: 84px; height: 84px; border-radius: 20px; }
+.splash b { font-size: 20px; }
+.splash .sbar { width: 120px; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.splash .sbar i { display: block; height: 100%; width: 40%; background: var(--accent); border-radius: 2px; animation: sbar 1.1s ease-in-out infinite; }
+@keyframes sbar { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
+@media (prefers-reduced-motion: reduce) { .splash .sbar i { animation: none; width: 60%; } }.scrub .tflag.r b { left: auto; right: 3px; }
+.scrub .tflag b { top: auto; bottom: 2px; }

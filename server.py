@@ -446,6 +446,7 @@ class Store:
             self.db.executescript('''
                 CREATE TABLE IF NOT EXISTS snaps (fp TEXT, ts INTEGER, equity REAL, PRIMARY KEY (fp, ts));
                 CREATE TABLE IF NOT EXISTS rsnaps (fp TEXT, ts INTEGER, realized REAL, PRIMARY KEY (fp, ts));
+                CREATE TABLE IF NOT EXISTS osnaps (fp TEXT, ts INTEGER, upnl REAL, PRIMARY KEY (fp, ts));
                 CREATE TABLE IF NOT EXISTS closes (
                     fp TEXT, pid TEXT, symbol TEXT, side TEXT, open_price REAL, close_price REAL,
                     size REAL, pnl REAL, net REAL, fees REAL, funding REAL, ctime INTEGER, utime INTEGER,
@@ -463,6 +464,21 @@ class Store:
         with self.lock:
             self.db.execute('INSERT OR REPLACE INTO rsnaps VALUES (?,?,?)', (fp, ts, realized))
             self.db.commit()
+
+    def add_open(self, fp, upnl, bucket=300):
+        """Offenes Ergebnis alle 5 min (fuer die Linie "realisiert + offen" im Zeitraum Heute)."""
+        ts = int(time.time()) // bucket * bucket
+        with self.lock:
+            self.db.execute('INSERT OR REPLACE INTO osnaps VALUES (?,?,?)', (fp, ts, upnl))
+            self.db.execute('DELETE FROM osnaps WHERE ts < ?', (ts - 8 * 86400,))
+            self.db.commit()
+
+    def open_series(self, fps, since):
+        if not fps:
+            return []
+        with self.lock:
+            return self.db.execute(f'SELECT ts, SUM(upnl), COUNT(*) FROM osnaps WHERE ts >= ? AND fp IN ({",".join("?" * len(fps))}) '
+                                   'GROUP BY ts ORDER BY ts', (since, *fps)).fetchall()
 
     def add_bills(self, fp, rows):
         with self.lock:
@@ -783,6 +799,7 @@ class Poller(threading.Thread):
         a['ts'], a['error'] = time.time(), None
         if equity is not None:
             self.store.add_snap(fp, equity - (upnl or 0))
+            self.store.add_open(fp, upnl or 0)
 
         if time.time() - a['last_history'] >= self.cfg['history_minutes'] * 60:
             since = int((time.time() - 89 * 86400) * 1000)
@@ -1155,6 +1172,25 @@ class App:
         pts = self.store.equity_series(fps, since, bucket, mode == 'gewinn') if fps else []
         return [{'t': t, 'v': round(v, 2)} for t, v in pts]
 
+    def open_curve(self, bot):
+        """Offenes Ergebnis seit 0 Uhr (5-min-Raster). Nur Zeitpunkte, an denen alle Konten gemessen wurden."""
+        fps = [f for f in self.fps_for(bot) if not str(f).startswith('paper:')]
+        since, _ = self.span('1T')
+        return [{'t': t, 'u': round(u, 2)} for t, u, n in self.store.open_series(fps, since) if n == len(fps)]
+
+    def transfers(self, bot, rng):
+        """Ein- und Auszahlungen im Zeitraum (Fähnchen auf der Kapitalkurve)."""
+        since, _ = self.span(rng)
+        out, seen = [], set()
+        for b in self.bots:
+            if not b['fp'] or b['fp'] in seen or (bot not in (None, '', 'all') and b['name'] != bot):
+                continue
+            seen.add(b['fp'])
+            for ts, amt, _, _ in self.store.bills_since(b['fp'], since * 1000, 'trans'):
+                if amt:
+                    out.append({'t': ts // 1000, 'amt': round(amt, 2), 'bot': b['name']})
+        return sorted(out, key=lambda x: x['t'])
+
     def race(self, rng):
         """Gewinnkurve je Bot auf gemeinsamem Zeitraster (fuer das Bot-Rennen)."""
         since, bucket = self.span(rng)
@@ -1256,7 +1292,7 @@ class App:
         for b in self.bots:
             name_of.setdefault(b['fp'], b['name'])
         rows = self.store.closes(fps, int((time.time() - 89 * 86400) * 1000))
-        return [{'bot': name_of.get(r['fp']), 'sym': r['symbol'], 'side': r['side'], 'net': r['net'], 'pnl': r['pnl'],
+        return [{'bot': name_of.get(r['fp']), 'pid': r['pid'], 'sym': r['symbol'], 'side': r['side'], 'net': r['net'], 'pnl': r['pnl'],
                  'fees': r['fees'], 'funding': r['funding'], 'ctime': r['ctime'], 'utime': r['utime'],
                  'size': r['size'], 'open': r['open_price'], 'close': r['close_price']} for r in rows]
 
@@ -1409,8 +1445,8 @@ class App:
         name_of = {}
         for b in self.bots:
             name_of.setdefault(b['fp'], b['name'])
-        days = {}
-        for r in rows:
+        days = {}   # Tagesergebnis ueber 26 Wochen (Kalender + Halbjahres-Uebersicht), soweit gespeichert
+        for r in self.store.closes(fps, int((time.time() - 183 * 86400) * 1000)):
             d = datetime.fromtimestamp(r['utime'] / 1000, tz).strftime('%Y-%m-%d')
             days[d] = days.get(d, 0.0) + r['net']
         month_start = int(datetime.now(tz).replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
@@ -1507,6 +1543,10 @@ def make_handler(app):
                 return self.send_json(app.poller.snapshot())
             if url.path == '/api/equity':
                 return self.send_json(app.equity(q.get('bot'), q.get('range', '1W'), q.get('mode', 'gewinn')))
+            if url.path == '/api/open':
+                return self.send_json(app.open_curve(q.get('bot')))
+            if url.path == '/api/transfers':
+                return self.send_json(app.transfers(q.get('bot'), q.get('range', '1M')))
             if url.path == '/api/stats':
                 return self.send_json(app.stats(q.get('bot')))
             if url.path == '/api/race':

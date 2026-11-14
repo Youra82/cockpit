@@ -86,7 +86,7 @@ function drawDrawdown(box, points) {
 }
 
 // ------------------------------------------------------------------ B: Bot-Rennen (alle starten bei 100)
-const raceOff = new Set();
+let raceSel = null;   // angetippter Bot: seine Linie dick, die anderen treten zurueck
 function drawRace(box, race) {
   // Jede Kurve ab ihrem ersten Wert > 0 auf 100 setzen
   const series = (race?.bots || []).map((b) => {
@@ -101,18 +101,20 @@ function drawRace(box, race) {
   series.forEach((s) => {
     const bt = document.createElement('button');
     bt.type = 'button';
-    bt.setAttribute('aria-pressed', String(!raceOff.has(s.name)));
     bt.innerHTML = `<i style="background:${botColor(s.name)}"></i>${esc(s.name)}`;
-    bt.addEventListener('click', () => { raceOff.has(s.name) ? raceOff.delete(s.name) : raceOff.add(s.name); bt.setAttribute('aria-pressed', String(!raceOff.has(s.name))); draw(null); });
+    bt.addEventListener('click', () => { raceSel = raceSel === s.name ? null : s.name; mark(); draw(null); });
     leg.appendChild(bt);
   });
+  const mark = () => leg.querySelectorAll('button').forEach((b, k) => b.setAttribute('aria-pressed', String(!raceSel || raceSel === series[k].name)));
+  if (raceSel && !series.some((s) => s.name === raceSel)) raceSel = null;
+  mark();
   const X0 = 32, X1 = 352, Y0 = 8, Y1 = 160;
   let svg, say;
   function draw(pick) {
     if (!svg) ({ svg, say } = chartShell(inner, 180, 'Bot-Rennen'));
     svg.innerHTML = '';
-    const act = series.filter((s) => !raceOff.has(s.name));
-    if (!act.length) { say('<span>Mindestens einen Bot einschalten.</span>'); return; }
+    // ausgewaehlter Bot zuletzt zeichnen, damit er oben liegt
+    const act = [...series].sort((a, b) => (a.name === raceSel) - (b.name === raceSel));
     const all = act.flatMap((s) => s.v.filter((v) => v != null));
     const lo = Math.min(...all, 99), hi = Math.max(...all, 101);
     const x = (i) => X0 + i / (N - 1) * (X1 - X0), y = (v) => Y0 + (1 - (v - lo) / (hi - lo)) * (Y1 - Y0);
@@ -120,9 +122,11 @@ function drawRace(box, race) {
     if (lo < 100 && hi > 100) svgEl('line', { x1: X0, x2: X1, y1: y(100), y2: y(100), class: 'zero' }, svg);
     act.forEach((s) => {
       const d = s.v.map((v, i) => (v == null ? '' : `${i && s.v[i - 1] != null ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`)).join(' ');
-      svgEl('path', { d, fill: 'none', stroke: botColor(s.name), 'stroke-width': 1.7, 'stroke-linejoin': 'round' }, svg);
+      const on = !raceSel || raceSel === s.name;
+      svgEl('path', { d, fill: 'none', stroke: botColor(s.name), 'stroke-width': raceSel === s.name ? 3.2 : raceSel ? 1.3 : 1.7,
+        'stroke-opacity': on ? 1 : 0.22, 'stroke-linejoin': 'round' }, svg);
       const lastV = s.v[N - 1];
-      if (lastV != null) svgEl('circle', { cx: X1, cy: y(lastV), r: 3, fill: botColor(s.name) }, svg);
+      if (lastV != null) svgEl('circle', { cx: X1, cy: y(lastV), r: raceSel === s.name ? 4.5 : 3, fill: botColor(s.name), 'fill-opacity': on ? 1 : 0.25 }, svg);
     });
     svgText(svg, X0, 176, dayStr(race.t[0] * 1000));
     svgText(svg, X1, 176, 'heute', 'end');
@@ -132,7 +136,10 @@ function drawRace(box, race) {
       act.forEach((s) => s.v[i] != null && svgEl('circle', { cx: x(i), cy: y(s.v[i]), r: 3.5, fill: botColor(s.name), stroke: cssVar('--card'), 'stroke-width': 1.5 }, svg));
     }
     const rank = act.filter((s) => s.v[i] != null).sort((a, b) => b.v[i] - a.v[i]);
-    say(`<span>${pick != null ? timeStr(race.t[i] * 1000) : 'Heute'} · Rangfolge (Start = 100)</span>
+    const sel = rank.find((s) => s.name === raceSel);
+    say(sel ? `<span>${pick != null ? timeStr(race.t[i] * 1000) : 'Heute'} · <b style="color:${botColor(sel.name)}">${esc(sel.name)}</b> steht bei <b class="${cls(sel.v[i] - 100)}">${nf(sel.v[i], 1)}</b></span>
+        <span>Platz ${rank.indexOf(sel) + 1} von ${rank.length} · ${signed(sel.v[i] - 100, 1)} % seit Start · Namen nochmal antippen zeigt wieder alle</span>`
+      : `<span>${pick != null ? timeStr(race.t[i] * 1000) : 'Heute'} · Rangfolge (Start = 100) · Bot antippen hebt ihn hervor</span>
       <span>${rank.map((s) => `<span style="color:${botColor(s.name)}">${esc(s.name)}</span> <b class="sm">${nf(s.v[i], 1)}</b>`).join(' · ')}</span>`);
   }
   draw(null);
@@ -287,68 +294,41 @@ function drawHeatmap(box, trades) {
 }
 
 // ------------------------------------------------------------------ F: Offene Positionen je Coin + Long/Short
+// Je Coin ein Balken: Short nach links, Long nach rechts (statt Ring mit vielen duennen Stuecken). Zeile antippen zeigt die Bots.
+let expoSel = null;
 function drawExposure(box, bots) {
   const counted = new Set(), byCoin = {};
   for (const b of bots) {
     if (!b.has_key || b.shared_with.some((n) => counted.has(n))) continue;
     counted.add(b.name);
     for (const p of b.positions) {
-      const k = `${coin(p.symbol).split('/')[0]}|${p.side}`;
-      (byCoin[k] ||= { c: coin(p.symbol).split('/')[0], s: p.side, v: 0, bots: [] });
-      byCoin[k].v += Math.abs(p.notional || 0);
-      byCoin[k].bots.push([b.name, Math.abs(p.notional || 0), p.upnl]);
+      const c = coin(p.symbol), n = Math.abs(p.notional || 0);
+      const r = (byCoin[c] ||= { c, L: 0, S: 0, bots: [] });
+      if (p.side === 'short') r.S += n; else r.L += n;
+      r.bots.push([b.name, p.side, n, p.upnl]);
     }
   }
-  const pos = Object.values(byCoin).filter((p) => p.v > 0).sort((a, b) => b.v - a.v);
-  if (!pos.length) return tooFew(box, 'Gerade keine offene Position.');
-  const tot = pos.reduce((a, p) => a + p.v, 0), L = pos.filter((p) => p.s === 'long').reduce((a, p) => a + p.v, 0), S = tot - L;
-  const { svg, say } = chartShell(box, 205, 'Offene Positionen nach Coin');
-  const cx = 88, cy = 86, R = 74, r0 = 47;
-  const pal = ['--b1', '--b2', '--b3', '--b4', '--b6', '--b5', '--muted', '--accent', '--warn', '--dim'].map(cssVar);
-  const color = (i) => pal[i % pal.length];
-  const arc = (a0, a1) => {
-    const p = (ang, rr) => `${(cx + rr * Math.cos(ang)).toFixed(2)} ${(cy + rr * Math.sin(ang)).toFixed(2)}`, big = a1 - a0 > Math.PI ? 1 : 0;
-    return `M${p(a0, R)} A${R} ${R} 0 ${big} 1 ${p(a1, R)} L${p(a1, r0)} A${r0} ${r0} 0 ${big} 0 ${p(a0, r0)} Z`;
-  };
-  const c1 = svgText(svg, cx, cy - 1, '', 'middle', true), c2 = svgText(svg, cx, cy + 14, '', 'middle');
-  c1.classList.add('big');
-  const arcs = [];
-  const rest = () => {
-    arcs.forEach((q) => q.setAttribute('opacity', 1));
-    c1.textContent = nf(tot, 0); c2.textContent = 'USDT';
-    say(`<span>${pos.length} Positionen · größter Brocken <b>${esc(pos[0].c)}</b> mit ${Math.round(pos[0].v / tot * 100)} %</span>
-      <span>Long <b class="up">${Math.round(L / tot * 100)} %</b> · Short <b class="down">${Math.round(S / tot * 100)} %</b></span>`);
-  };
-  let a = -Math.PI / 2;
-  const gap = pos.length > 1 ? 0.012 : 0;
-  pos.forEach((p, i) => {
-    // Vollkreis bei nur einer Position: knapp unter 2*PI, sonst zeichnet der Bogen nichts
-    const a1 = a + Math.min(p.v / tot * Math.PI * 2, Math.PI * 2 - 0.001);
-    const path = svgEl('path', { d: arc(a + gap, a1 - gap), fill: color(i), class: 'hit' }, svg);
-    arcs.push(path);
-    path.addEventListener('pointerdown', (e) => {
-      e.stopPropagation();
-      arcs.forEach((q, k) => q.setAttribute('opacity', k === i ? 1 : 0.3));
-      c1.textContent = p.c; c2.textContent = `${Math.round(p.v / tot * 100)} % · ${p.s}`;
-      say(`<span><b>${esc(p.c)}</b> ${esc(p.s)} · ${nf(p.v, 0)} USDT Positionsgröße</span>
-        <span>${p.bots.map(([b, n, u]) => `<span style="color:${botColor(b)}">${esc(b)}</span> ${nf(n, 0)} (<span class="${cls(u)}">${signed(u)}</span>)`).join(' · ')}${p.bots.length > 1 ? ' · <span class="warn">mehrere Bots</span>' : ''}</span>`);
-    });
-    a = a1;
-  });
-  pos.slice(0, 7).forEach((p, i) => {
-    const yy = 20 + i * 20;
-    svgEl('rect', { x: 186, y: yy - 8, width: 9, height: 9, rx: 2, fill: color(i) }, svg);
-    svgText(svg, 201, yy, `${p.c} ${p.s === 'long' ? '▲' : '▼'}`, 'start', true);
-    svgText(svg, 352, yy, `${Math.round(p.v / tot * 100)} %`, 'end');
-  });
-  if (pos.length > 7) svgText(svg, 201, 20 + 7 * 20, `+ ${pos.length - 7} weitere`);
-  const by = 186, bx0 = 8, bx1 = 352, mid = bx0 + L / tot * (bx1 - bx0);
-  if (L > 0) svgEl('rect', { x: bx0, y: by, width: Math.max(2, mid - bx0 - 1), height: 10, rx: 3, fill: cssVar('--up') }, svg);
-  if (S > 0) svgEl('rect', { x: mid + 1, y: by, width: Math.max(2, bx1 - mid - 1), height: 10, rx: 3, fill: cssVar('--down') }, svg);
-  svgText(svg, bx0, by - 4, 'Long');
-  svgText(svg, bx1, by - 4, 'Short', 'end');
-  svg.addEventListener('pointerdown', rest);
-  rest();
+  const rows = Object.values(byCoin).filter((r) => r.L + r.S > 0).sort((a, b) => (b.L + b.S) - (a.L + a.S));
+  if (!rows.length) return tooFew(box, 'Gerade keine offene Position.');
+  const tot = rows.reduce((s, r) => s + r.L + r.S, 0), L = rows.reduce((s, r) => s + r.L, 0), S = tot - L;
+  const mx = Math.max(...rows.map((r) => Math.max(r.L, r.S)), 0.01);
+  if (expoSel && !rows.some((r) => r.c === expoSel)) expoSel = null;
+  const sel = rows.find((r) => r.c === expoSel);
+  const pc = (v) => Math.round(v / tot * 100);
+  box.innerHTML = `<div class="info">${sel
+    ? `<span><b>${esc(sel.c)}</b> · ${nf(sel.L + sel.S, 0)} USDT · ${pc(sel.L + sel.S)} % von allem${sel.L && sel.S ? ' · <span class="warn">Long und Short gleichzeitig</span>' : ''}</span>
+       <span>${sel.bots.map(([b, s, n, u]) => `<span style="color:${botColor(b)}">${esc(b)}</span> ${esc(s)} ${nf(n, 0)} (<span class="${cls(u)}">${signed(u)}</span>)`).join(' · ')}</span>`
+    : `<span>${rows.length} Coins · ${nf(tot, 0)} USDT Positionsgröße · größter Brocken <b>${esc(rows[0].c)}</b> mit ${pc(rows[0].L + rows[0].S)} %</span>
+       <span>Long <b class="up">${pc(L)} %</b> · Short <b class="down">${pc(S)} %</b> · Zeile antippen zeigt die Bots</span>`}</div>
+    <div class="lsbar" aria-hidden="true">${L ? `<i style="flex:${L};background:var(--up)"></i>` : ''}${S ? `<i style="flex:${S};background:var(--down)"></i>` : ''}</div>
+    <div class="erow ehead" aria-hidden="true"><span></span><span>◀ Short</span><span>Long ▶</span><span>USDT</span></div>
+    ${rows.map((r) => `<button type="button" class="erow${r.c === expoSel ? ' on' : ''}" data-c="${esc(r.c)}" aria-pressed="${r.c === expoSel}">
+      <b>${esc(r.c)}</b><span class="eh s"><i style="width:${(r.S / mx * 100).toFixed(1)}%"></i></span><span class="eh l"><i style="width:${(r.L / mx * 100).toFixed(1)}%"></i></span>
+      <span class="mono">${nf(r.L + r.S, 0)}</span></button>`).join('')}`;
+  box.querySelectorAll('.erow[data-c]').forEach((el) => el.addEventListener('click', () => {
+    expoSel = expoSel === el.dataset.c ? null : el.dataset.c;
+    drawExposure(box, bots);
+  }));
 }
 
 // ------------------------------------------------------------------ K: Gewinn/Verlust je Coin
@@ -571,7 +551,7 @@ function drawPositions(box, rows, withBot, limit) {
     <div class="pls"><div class="bar"><i style="flex:${longs};background:var(--up)"></i><i style="flex:${rows.length - longs};background:var(--down)"></i></div>
       <div><span>${longs} Long</span><span>${rows.length - longs} Short</span></div></div>
     <div class="seg wrap" role="group" aria-label="Sortierung"></div><div class="plist"></div>
-    <div class="lbl">Balken: SL (rot), Einstieg (grau), Kurs (●), TP (grün). Gestrichelt grün mit Pfeil: ab hier Trailing-Stop, kein festes Ziel. Rechts der Abstand zum Stop-Loss: rot unter 2 %, gelb unter 5 %.</div>
+    <div class="lbl">Balken: links der Stop, rechts das Ziel (Take-Profit oder Trailing-Start), Strich = Einstieg, Punkt = Kurs. Gefärbt ist, wie weit der Kurs schon gelaufen ist. Rechts der Abstand zum Stop-Loss: rot unter 2 %, gelb unter 5 %. Antippen zeigt die genaue Preisleiter.</div>
     ${rows.some((p) => p.nosl) ? '<div class="lbl">Ohne Stop-Loss (Regel): rot ist dann die Liquidation, rechts „Liq“ = Abstand dorthin. Ausstieg nach Zeit, Trend oder Ziel – antippen zeigt, wann.</div>' : ''}`;
   const seg = box.querySelector('.seg');
   Object.entries(sorts).forEach(([k, [l]]) => {
@@ -580,28 +560,23 @@ function drawPositions(box, rows, withBot, limit) {
     bt.addEventListener('click', () => { posSort = k; drawPositions(box, rows, withBot, limit); });
     seg.appendChild(bt);
   });
-  const mini = (p) => {
-    // Ohne festes TP, aber mit Trailing-Stop: Start markieren und Platz fuer das offene Ende lassen
-    const trail = !p.tp && p.trail ? p.trail : null;
-    const sl = stopOf(p);
-    const vals = [sl, p.tp, p.entry, p.mark, trail].filter((v) => v);
-    let lo = Math.min(...vals), hi = Math.max(...vals);
-    const up = trail && trail > p.entry;
-    if (trail) { const ext = (hi - lo) * 0.22; if (up) hi += ext; else lo -= ext; }
-    const x = (v) => (hi > lo ? 4 + (v - lo) / (hi - lo) * 192 : 100).toFixed(1);
-    const zone = (a, b, c, o = 0.3) => (a && b ? `<rect x="${Math.min(x(a), x(b))}" y="8" width="${Math.abs(x(a) - x(b)).toFixed(1)}" height="6" rx="2" fill="${c}" fill-opacity="${o}"/>` : '');
-    const tick = (v, c, h, dash) => (v ? `<line x1="${x(v)}" x2="${x(v)}" y1="${11 - h}" y2="${11 + h}" stroke="${c}" stroke-width="2"${dash ? ' stroke-dasharray="2 2"' : ''}/>` : '');
-    const tail = trail ? (() => {
-      const a = Number(x(trail)), e = up ? 194 : 6;
-      return `<line x1="${a}" x2="${e}" y1="11" y2="11" stroke="var(--up)" stroke-width="2" stroke-dasharray="3 3" stroke-opacity=".8"/>
-        <path d="M${e} 11 l${up ? -6 : 6} -5 v10 z" fill="var(--up)" fill-opacity=".8"/>`;
-    })() : '';
-    return `<svg viewBox="0 0 200 22" preserveAspectRatio="none" aria-hidden="true"><line x1="4" x2="196" y1="11" y2="11" stroke="var(--line)" stroke-width="2"/>
-      ${zone(sl, p.entry, 'var(--down)')}${zone(p.entry, p.tp, 'var(--up)')}${trail ? zone(p.entry, trail, 'var(--up)', 0.18) : ''}${tail}
-      ${tick(sl, 'var(--down)', 8, !p.sl)}${tick(p.tp, 'var(--up)', 8)}${tick(trail, 'var(--up)', 8, true)}${tick(p.entry, 'var(--muted)', 6)}
-      <circle cx="${x(p.mark)}" cy="11" r="4.5" fill="var(--text)" stroke="var(--card)" stroke-width="2"/></svg>`;
-  };
-  const list = box.querySelector('.plist');
+  // Fortschritt statt Preisleiter: links Stop (bzw. Liquidation), rechts Ziel (TP oder Trailing-Start), Strich = Einstieg, Punkt = Kurs
+  const prog = (p) => {
+    const stop = stopOf(p), goal = p.tp || p.trail || null;
+    if (!stop || !p.mark || !p.entry || stop === p.entry) return { html: '', say: '' };
+    const end = goal || p.entry + (p.entry - stop);   // ohne Ziel: gleich weit wie der Stop, rechts offen
+    const f = (v) => Math.max(0, Math.min(1, (v - stop) / (end - stop)));
+    const e = f(p.entry), c = f(p.mark), good = c >= e;
+    const fill = good ? `left:${(e * 100).toFixed(1)}%;width:${((c - e) * 100).toFixed(1)}%` : `left:${(c * 100).toFixed(1)}%;width:${((e - c) * 100).toFixed(1)}%`;
+    const share = Math.round((good ? (c - e) / (1 - e || 1) : (e - c) / (e || 1)) * 100);
+    const say = good ? (goal ? `${share} % des Wegs zum ${p.tp ? 'Ziel' : 'Trailing-Start'}` : 'im Plus · kein festes Ziel')
+      : `${share} % des Wegs zum ${p.sl ? 'Stop' : 'Liquidationspreis'}`;
+    return {
+      good, say,
+      html: `<div class="ptrack" aria-hidden="true"><i class="pfill ${good ? 'up' : 'down'}" style="${fill}"></i><i class="pent" style="left:${(e * 100).toFixed(1)}%"></i>
+        <i class="pcur" style="left:${(c * 100).toFixed(1)}%"></i>${goal ? '' : '<i class="popen"></i>'}</div>`,
+    };
+  };  const list = box.querySelector('.plist');
   const sorted = [...rows].sort(sorts[posSort][1]);
   const cut = limit && !posAll && sorted.length > limit ? limit : sorted.length;
   if (cut < sorted.length) {
@@ -613,14 +588,14 @@ function drawPositions(box, rows, withBot, limit) {
   sorted.slice(0, cut).forEach((p) => {
     const id = `${p.bot}|${p.symbol}|${p.side}${p.art ? '|' + p.art + '|' + p.opened : ''}`, d = toSl(p), open = posOpen.has(id);
     const dc = d == null || d < 2 ? 'r' : d < 5 ? 'y' : 'g';
-    const { slFirst, liqCol } = liqInfo(p);
+    const { slFirst, liqCol } = liqInfo(p), pr = prog(p);
     const row = document.createElement('div');
     row.className = 'prow'; row.tabIndex = 0; row.setAttribute('role', 'button'); row.setAttribute('aria-expanded', String(open));
     row.innerHTML = `<div class="pwho">${withBot ? `<span class="pdot" style="background:${botColor(p.bot)}"></span>` : ''}<b>${esc(coin(p.symbol).split('/')[0])}</b>
         <span class="side ${p.side === 'short' ? 'short' : 'long'}">${esc((p.side || '').toUpperCase())}</span>
         <span class="pbot">${p.leverage ? nf(p.leverage, 0) + '×' : ''}${p.art ? ` · ${esc(p.art)}` : ''}${withBot ? ` · ${esc(p.bot)}` : ''}</span></div>
       <div class="ppnl mono ${cls(p.upnl)}">${signed(p.upnl)}</div>
-      <div class="pmini">${mini(p)}<span class="pdist ${dc}">${d == null ? 'kein SL' : `${p.sl ? 'SL' : 'Liq'} ${nf(d, 1)} %`}</span></div>
+      <div class="pmini">${pr.html}<span class="pdist ${dc}">${d == null ? 'kein SL' : `${p.sl ? 'SL' : 'Liq'} ${nf(d, 1)} %`}</span></div>${pr.say ? `<div class="psay ${pr.good ? 'up' : 'down'}">${pr.say}</div>` : ''}
       ${open ? `<div class="pdet"><div class="grid4"><span>Einstieg<b>${price(p.entry)}</b></span><span>Aktuell<b>${price(p.mark)}</b></span>
           ${p.nosl && !p.sl ? `<span>Stop-Loss<b class="muted">keiner · Liq ${price(p.liq)}</b></span>` : `<span>${p.nosl ? 'Trailing-Stop' : 'SL'}<b class="${p.sl ? 'down' : 'warn'}">${p.sl ? price(p.sl) : 'FEHLT'}</b></span>`}<span>${!p.tp && p.trail ? 'Trailing ab' : 'TP'}<b class="${p.tp || p.trail ? 'up' : 'muted'}">${p.tp ? price(p.tp) : p.trail ? price(p.trail) : '—'}</b></span></div>
         ${p.ziel ? `<div class="lbl">Ausstieg: <b>${esc(zielText(p.ziel))}</b></div>` : ''}
@@ -1020,4 +995,48 @@ function zielText(z) {
   if (z.typ === 'unlock') return `erster Tagesschluss über SMA10 nach dem Unlock am ${tag(z.tag_ms)}, spätestens ${tag(z.frist_ms)}`;
   if (z.typ === 'mitte') return 'Take-Profit an der wandernden Mitte';
   return '—';
+}
+
+// ------------------------------------------------------------------ Y: Gewinn pro Tag ueber 26 Wochen + Wochensumme
+function drawYear(box, days) {
+  const by = Object.fromEntries((days || []).map((d) => [d.d, d.v]));
+  const p2 = (n) => String(n).padStart(2, '0');
+  const key = (dt) => `${dt.getFullYear()}-${p2(dt.getMonth() + 1)}-${p2(dt.getDate())}`;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const start = new Date(today); start.setDate(start.getDate() - ((today.getDay() + 6) % 7) - 25 * 7);   // Montag vor 25 Wochen
+  const cells = [], sums = [], months = [];
+  let lastMonth = -1;
+  for (let w = 0; w < 26; w++) {
+    let s = 0;
+    for (let d = 0; d < 7; d++) {
+      const dt = new Date(start); dt.setDate(start.getDate() + w * 7 + d);
+      const k = key(dt), v = by[k], future = dt > today;
+      if (v != null) s += v;
+      cells.push({ k, v, future, dt });
+      if (d === 0 && dt.getMonth() !== lastMonth) { months.push([w, dt.toLocaleDateString('de-DE', { month: 'short' })]); lastMonth = dt.getMonth(); }
+    }
+    sums.push(s);
+  }
+  const vals = cells.filter((c) => c.v != null);
+  if (!vals.length) return tooFew(box, 'Noch keine Tagesergebnisse.');
+  const mx = Math.max(...vals.map((c) => Math.abs(c.v)), 0.01), ms = Math.max(...sums.map(Math.abs), 0.01);
+  const col = (v) => {
+    if (v == null || Math.abs(v) < 0.005) return 'var(--line)';
+    const a = (0.25 + Math.min(1, Math.abs(v) / mx) * 0.7).toFixed(2);
+    return v > 0 ? `rgba(63,191,128,${a})` : `rgba(242,118,127,${a})`;
+  };
+  const best = vals.reduce((a, b) => (b.v > a.v ? b : a)), worst = vals.reduce((a, b) => (b.v < a.v ? b : a));
+  const dstr = (dt) => dt.toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' });
+  const rest = `<span>${vals.length} Handelstage · <b class="up">${vals.filter((c) => c.v > 0).length}</b> im Plus · <b class="down">${vals.filter((c) => c.v < 0).length}</b> im Minus</span>
+    <span>bester Tag ${dstr(best.dt)} <b class="up">${signed(best.v)}</b> · schlechtester ${dstr(worst.dt)} <b class="down">${signed(worst.v)}</b></span>`;
+  box.innerHTML = `<div class="info">${rest}</div>
+    <div class="yr">${cells.map((c, i) => `<i data-i="${i}" style="background:${c.future ? 'transparent' : col(c.v)}"></i>`).join('')}</div>
+    <div class="yrw" aria-hidden="true">${sums.map((s) => `<span><i class="${s >= 0 ? 'p' : 'n'}" style="height:${(Math.abs(s) / ms * 50).toFixed(1)}%"></i></span>`).join('')}</div>
+    <div class="yrm" aria-hidden="true">${months.map(([w, l]) => `<span style="grid-column:${w + 1}">${esc(l)}</span>`).join('')}</div>`;
+  const info = box.querySelector('.info');
+  box.querySelector('.yr').addEventListener('click', (e) => {
+    const c = cells[e.target.dataset.i];
+    if (!c || c.future) return;
+    info.innerHTML = `<span>${dstr(c.dt)} ${c.dt.getFullYear()}</span><span>${c.v == null ? 'kein Trade geschlossen' : `<b class="${cls(c.v)}">${signed(c.v)} USDT</b>`} · Woche <b class="${cls(sums[Math.floor(e.target.dataset.i / 7)])}">${signed(sums[Math.floor(e.target.dataset.i / 7)])}</b></span>`;
+  });
 }

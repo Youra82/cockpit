@@ -63,13 +63,14 @@ function totals(bots) {
 }
 
 // Realisiert + offen = zusammen, in drei beschrifteten Spalten
-function pnlSplit(real, open) {
+function pnlSplit(real, open, key = 'tot') {
   const sum = (real || 0) + (open || 0);
-  const col = (label, v, hint) => `<div><span class="lbl">${label}</span><b class="${cls(v)}">${signed(v)}</b><small>${hint}</small></div>`;
+  // data-k: Wert leuchtet kurz auf, wenn er sich seit dem letzten Abruf geaendert hat
+  const col = (label, v, hint, k) => `<div data-k="${key}:${k}"><span class="lbl">${label}</span><b class="${cls(v)}">${signed(v)}</b><small>${hint}</small></div>`;
   return `<div class="split">
-    ${col('Realisiert heute', real, 'seit 0 Uhr')}
-    <i>+</i>${col('Offen jetzt', open, 'laufende Trades')}
-    <i>=</i>${col('Zusammen', sum, 'falls jetzt zu')}</div>`;
+    ${col('Realisiert heute', real, 'seit 0 Uhr', 'r')}
+    <i>+</i>${col('Offen jetzt', open, 'laufende Trades', 'o')}
+    <i>=</i>${col('Zusammen', sum, 'falls jetzt zu', 'z')}</div>`;
 }
 
 // Zeitraum- und Modus-Umschalter ueber jedem Diagramm
@@ -83,33 +84,89 @@ function chartControls() {
     <div class="stip" aria-live="polite"></div></div>`;
 }
 
-function chartWithSummary(points) {
+// Kapitalkurve mit Markierungen. ex = { trades, transfers, open } (alles optional):
+// Trades als Punkte, Ein-/Auszahlungen als Faehnchen, Hoch/Tief, im Zeitraum Heute zusaetzlich "realisiert + offen".
+function chartWithSummary(points, ex = {}) {
   if (!points || points.length < 2) return chartSvg(points);
+  const comb = combLine(points, ex.open);
+  const sc = chartScale(points, false, comb);
   const first = points[0], last = points[points.length - 1];
   const diff = last.v - first.v, pct = first.v ? diff / first.v * 100 : null;
-  const d = (t) => new Date(t * 1000).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
-  const { H, y, ticks, dec } = chartScale(points);
-  const labels = ticks.map((v) => nf(v, dec));
-  const axis = labels.map((l, k) => `<span style="top:${(y(ticks[k]) / H * 100).toFixed(2)}%">${l}</span>`).join('');
+  const lab = (t) => (ui.range === '1T' ? new Date(t * 1000).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
+    : new Date(t * 1000).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' }));
+  const labels = sc.ticks.map((v) => nf(v, sc.dec));
+  const axis = labels.map((l, k) => `<span style="top:${(sc.y(sc.ticks[k]) / sc.H * 100).toFixed(2)}%">${l}</span>`).join('');
+  const mk = chartMarks(points, ex, sc);
+  const legend = [mk.nTrades ? '<span><i class="lg up"></i>Gewinn-Trade</span><span><i class="lg down"></i>Verlust-Trade</span>' : '',
+    mk.nFlags ? '<span><b class="lgf">⚑</b>Ein-/Auszahlung</span>' : '', comb ? '<span><i class="lgd"></i>inkl. offener Positionen</span>' : ''].join('');
   // Breite nach laengster Zahl, damit die Kurve daneben bleibt
   return `<div class="chartwrap"><div class="yaxis" style="width:${Math.max(...labels.map((l) => l.length))}ch" aria-hidden="true">${axis}</div>
-    <div class="scrub">${chartSvg(points)}
+    <div class="scrub">${chartSvg(points, false, comb)}${mk.html}
       <i class="sline" hidden></i><i class="sdot" hidden></i></div></div>
-    <div style="display:flex;justify-content:space-between;font-size:12px" class="muted">
-      <span>${ui.range === '1T' ? '0 Uhr' : d(first.t)}</span>
-      <b class="${cls(diff)}">${signed(diff)} USDT${pct != null ? ` · ${signed(pct, 1)} %` : ''}</b>
-      <span>heute</span></div>
-    <span class="lbl">Kurve = realisierter Kontostand, ohne offene Positionen${ui.mode === 'gewinn' ? ', Ein- und Auszahlungen herausgerechnet' : ''}.</span>`;
+    <div class="xaxis"><span>${ui.range === '1T' ? '0 Uhr' : lab(first.t)}</span><span>${lab(points[Math.floor(points.length / 2)].t)}</span><span>heute</span></div>
+    <div class="cdiff"><b class="${cls(diff)}">${signed(diff)} USDT${pct != null ? ` · ${signed(pct, 1)} %` : ''}</b>${comb ? ` <span class="muted">· inkl. offen <b class="${cls(comb[comb.length - 1] - first.v)}">${signed(comb[comb.length - 1] - first.v)}</b></span>` : ''}</div>
+    ${legend ? `<div class="clegend">${legend}</div>` : ''}
+    <span class="lbl">Kurve = realisierter Kontostand${comb ? ' (durchgezogen), gestrichelt mit offenen Positionen' : ', ohne offene Positionen'}${ui.mode === 'gewinn' ? ', Ein- und Auszahlungen herausgerechnet' : ''}. Finger über die Kurve zeigt Wert und Trades.</span>`;
 }
 
-// Gemeinsame Skala fuer Kurve und Finger-Markierung
-function chartScale(points, small) {
-  const vs = points.map((p) => p.v);
+// Zeitraum Heute: je Kurvenpunkt realisiert + offenes Ergebnis zu diesem Zeitpunkt
+function combLine(points, open) {
+  if (ui.range !== '1T' || !open || open.length < 2) return null;
+  let k = -1;
+  const out = points.map((p) => { while (k + 1 < open.length && open[k + 1].t <= p.t) k++; return k < 0 ? null : p.v + open[k].u; });
+  return out.filter((v) => v != null).length >= 2 ? out : null;
+}
+
+// Index des letzten Kurvenpunkts bis zum Zeitpunkt ts (Sekunden); -1 = vor Beginn
+function pointIdx(points, ts) {
+  if (ts < points[0].t) return -1;
+  let lo = 0, hi = points.length - 1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (points[m].t <= ts) lo = m; else hi = m - 1; }
+  return lo;
+}
+
+// Punkte (Trades), Faehnchen (Ein-/Auszahlungen), Hoch/Tief als HTML ueber der Kurve (bleiben rund, auch wenn das SVG gestreckt ist)
+function chartMarks(points, ex, sc) {
+  const n = points.length, t0 = points[0].t, t1 = points[n - 1].t + 300;
+  const pos = (i, v) => `left:${(i / (n - 1) * 100).toFixed(2)}%;top:${(sc.y(v) / sc.H * 100).toFixed(2)}%`;
+  let html = '';
+  const tr = (ex.trades || []).filter((t) => t.utime / 1000 >= t0 && t.utime / 1000 <= t1)
+    .sort((a, b) => Math.abs(b.net) - Math.abs(a.net)).slice(0, 40);
+  const mx = Math.max(0.01, ...tr.map((t) => Math.abs(t.net)));
+  tr.forEach((t) => {
+    const i = pointIdx(points, t.utime / 1000);
+    if (i < 0) return;
+    html += `<i class="tdot ${t.net >= 0 ? 'up' : 'down'}" style="${pos(i, points[i].v)};--s:${(5 + Math.abs(t.net) / mx * 6).toFixed(1)}px"></i>`;
+  });
+  // Ein-/Auszahlungen: dicht beieinander (unter 6 % Breite) zu einem Faehnchen zusammenfassen
+  const fl = [];
+  (ex.transfers || []).filter((f) => f.t >= t0 && f.t <= t1).forEach((f) => {
+    const i = pointIdx(points, f.t);
+    if (i < 0) return;
+    const x = i / (n - 1) * 100, prev = fl[fl.length - 1];
+    if (prev && x - prev.x < 6) prev.amt += f.amt; else fl.push({ x, amt: f.amt });
+  });
+  fl.forEach((f) => { html += `<i class="tflag${f.x > 80 ? ' r' : ''}" style="left:${f.x.toFixed(2)}%"><b>${signed(f.amt, 0)}</b></i>`; });
+  let hi = 0, lo = 0;
+  points.forEach((p, i) => { if (p.v > points[hi].v) hi = i; if (p.v < points[lo].v) lo = i; });
+  if (points[hi].v - points[lo].v > Math.abs(points[n - 1].v) * 0.004) {
+    [[hi, 'Hoch'], [lo, 'Tief']].forEach(([i, l]) => {
+      // Beschriftung in die freie Richtung: unten liegende Punkte oben beschriften und umgekehrt, rechts nach links
+      const below = sc.y(points[i].v) / sc.H < 0.4 ? ' t' : '', side = i / (n - 1) > 0.6 ? ' r' : '';
+      html += `<i class="hlring" style="${pos(i, points[i].v)}"></i><span class="hllab${below}${side}" style="${pos(i, points[i].v)}">${l} ${nf(points[i].v, 0)}</span>`;
+    });
+  }
+  return { html, nTrades: tr.length, nFlags: fl.length };
+}
+
+// Gemeinsame Skala fuer Kurve und Finger-Markierung (comb = zweite Linie "inkl. offen", optional)
+function chartScale(points, small, comb) {
+  const vs = points.map((p) => p.v).concat((comb || []).filter((v) => v != null));
   let lo = Math.min(...vs), hi = Math.max(...vs);
   // Mindesthoehe 2 % des Kapitals: Cent-Schwankungen sollen nicht wie ein Absturz aussehen
-  const minSpan = Math.max(1e-9, Math.abs(vs[vs.length - 1]) * 0.02);
+  const minSpan = Math.max(1e-9, Math.abs(points[points.length - 1].v) * 0.02);
   if (hi - lo < minSpan) { const mid = (hi + lo) / 2; lo = mid - minSpan / 2; hi = mid + minSpan / 2; }
-  const W = 320, H = small ? 56 : 110, pad = 4;
+  const W = 320, H = small ? 56 : 110, pad = small ? 4 : 10;
   // 3-4 runde Skalenwerte (Schritt 1, 2, 2,5 oder 5 x 10^n)
   const mag = 10 ** Math.floor(Math.log10((hi - lo) / 3));
   const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((st) => (hi - lo) / st <= 3.5);
@@ -119,29 +176,35 @@ function chartScale(points, small) {
   return { W, H, ticks, dec, x: (i) => i / (points.length - 1) * W, y: (v) => pad + (1 - (v - lo) / (hi - lo)) * (H - 2 * pad) };
 }
 
-function chartSvg(points, small) {
+function chartSvg(points, small, comb) {
   if (!points || points.length < 2) return `<div class="empty">Noch zu wenig Daten für eine Kurve.</div>`;
   const vs = points.map((p) => p.v);
-  const { W, H, x, y, ticks } = chartScale(points, small);
+  const { W, H, x, y, ticks } = chartScale(points, small, comb);
   const line = points.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(p.v).toFixed(1)}`).join(' ');
   const col = vs[vs.length - 1] >= vs[0] ? 'var(--up)' : 'var(--down)';
+  const dash = comb ? comb.map((v, i) => (v == null ? '' : `${i && comb[i - 1] != null ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`)).join(' ') : '';
   return `<svg class="chart${small ? ' small' : ''}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Kapitalverlauf">
     ${small ? '' : ticks.map((v) => `<line x1="0" x2="${W}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" stroke="var(--line)" stroke-width="1" vector-effect="non-scaling-stroke"/>`).join('')}
     <path d="${line} L${W} ${H} L0 ${H} Z" fill="${col}" fill-opacity="0.12"/>
-    <path d="${line}" fill="none" stroke="${col}" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>`;
+    <path d="${line}" fill="none" stroke="${col}" stroke-width="2" vector-effect="non-scaling-stroke"/>
+    ${dash ? `<path d="${dash}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="5 4" vector-effect="non-scaling-stroke"/>` : ''}</svg>`;
 }
 
-// Finger (oder Maus) auf der Kurve: Punkt, senkrechte Linie und Wert an dieser Stelle
+// Finger (oder Maus) auf der Kurve: Punkt, senkrechte Linie, Wert und die Trades an dieser Stelle
 let scrubbing = false;
-function bindScrub(host, points) {
+function bindScrub(host, points, ex = {}) {
   const box = host?.querySelector('.scrub');
   if (!box || !points || points.length < 2) return;
   const [line, dot] = ['.sline', '.sdot'].map((q) => box.querySelector(q));
   const tip = host.closest('.card')?.querySelector('.stip');
   if (!tip) return;
-  const { H, y } = chartScale(points);
+  const comb = combLine(points, ex.open);
+  const { H, y } = chartScale(points, false, comb);
   const svg = box.querySelector('svg');
   const first = points[0].v;
+  const trAt = {};
+  (ex.trades || []).forEach((t) => { const i = pointIdx(points, t.utime / 1000); if (i >= 0) (trAt[i] ||= []).push(t); });
+  const near = (i) => [i, i - 1, i + 1].flatMap((k) => trAt[k] || []).sort((a, b) => Math.abs(b.net) - Math.abs(a.net)).slice(0, 2);
   const show = (ev) => {
     const r = box.getBoundingClientRect();
     const f = Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width));
@@ -153,7 +216,9 @@ function bindScrub(host, points) {
     line.style.left = dot.style.left = `${px}px`;
     dot.style.top = `${py}px`;
     const diff = p.v - first;
-    tip.innerHTML = `<b>${nf(p.v)} USDT</b><span class="${cls(diff)}">${signed(diff)}${first ? ` · ${signed(diff / first * 100, 1)} %` : ''}</span><small>${timeStr(p.t * 1000)}</small>`;
+    const tt = near(i).map((t) => `<small>${esc(coin(t.sym))} <span class="${cls(t.net)}">${signed(t.net)}</span> · ${esc(t.bot || '')}</small>`).join('');
+    tip.innerHTML = `<b>${nf(p.v)} USDT</b><span class="${cls(diff)}">${signed(diff)}${first ? ` · ${signed(diff / first * 100, 1)} %` : ''}</span>
+      ${comb && comb[i] != null ? `<small>inkl. offen ${nf(comb[i])}</small>` : ''}<small>${timeStr(p.t * 1000)}</small>${tt}`;
     line.hidden = dot.hidden = false;
     tip.classList.add('on');
   };
@@ -162,6 +227,41 @@ function bindScrub(host, points) {
   box.addEventListener('pointermove', (ev) => { if (scrubbing || ev.pointerType === 'mouse') show(ev); });
   ['pointerup', 'pointercancel'].forEach((e) => box.addEventListener(e, hide));
   box.addEventListener('pointerleave', (ev) => { if (ev.pointerType === 'mouse') hide(); });
+}
+
+// Mini-Kurve je Bot (7 Tage) fuer die Bot-Zeilen der Uebersicht
+function sparkSvg(vals) {
+  const v = (vals || []).filter((x) => x != null);
+  if (v.length < 3) return '';
+  const lo = Math.min(...v), hi = Math.max(...v), span = hi - lo || 1;
+  const d = v.map((x, i) => `${i ? 'L' : 'M'}${(1 + i / (v.length - 1) * 54).toFixed(1)} ${(24 - (x - lo) / span * 20).toFixed(1)}`).join(' ');
+  const up = v[v.length - 1] >= v[0], col = up ? 'var(--up)' : 'var(--down)';
+  const ly = (24 - (v[v.length - 1] - lo) / span * 20).toFixed(1);
+  return `<svg viewBox="0 0 56 28" aria-label="7 Tage ${up ? 'gestiegen' : 'gefallen'}" role="img"><path d="${d}" fill="none" stroke="${col}" stroke-width="1.6" stroke-linejoin="round" vector-effect="non-scaling-stroke"/><circle cx="55" cy="${ly}" r="2" fill="${col}"/></svg>`;
+}
+
+// Kurzzeit-Zwischenspeicher fuer grosse, selten wechselnde Abrufe (Trades, Rennen, Ein-/Auszahlungen)
+const apiCache = {};
+async function cachedApi(path, ttl = 120000) {
+  const c = apiCache[path];
+  if (c && Date.now() - c.t < ttl) return c.d;
+  const d = await api(path);
+  apiCache[path] = { t: Date.now(), d };
+  return d;
+}
+
+// Aenderungen seit dem letzten Abruf kurz aufleuchten lassen (nur wenn dieselbe Seite neu gezeichnet wird)
+const prevVals = {};
+let prevPage = '';
+function flashChanges() {
+  const page = location.hash, same = page === prevPage;
+  prevPage = page;
+  const num = (s) => parseFloat(s.replace(/[^\d,−+-]/g, '').replace('−', '-').replace(',', '.')) || 0;
+  app.querySelectorAll('[data-k]').forEach((el) => {
+    const k = el.dataset.k, v = el.textContent.trim(), old = prevVals[k];
+    if (same && old != null && old !== v) el.classList.add('flash', num(v) >= num(old) ? 'fup' : 'fdown');
+    prevVals[k] = v;
+  });
 }
 
 // Einklappbarer Abschnitt. Der Inhalt wird immer gezeichnet und nur versteckt, damit Diagramme ihre Box finden.
@@ -271,13 +371,14 @@ function botRow(b) {
     : !b.has_key ? 'kein API-Schlüssel gefunden' : b.running ? `läuft · ${ago(b.last_activity)}` : `steht · letzter Lauf ${ago(b.last_activity)}`;
   // Rechts: realisiert heute + offen jetzt = zusammen (wie die grosse Karte oben), links Kontostand und Positionen
   const has = b.paper || b.has_key, real = b.pnl_today || 0, open = b.upnl || 0;
-  const val = (l, v) => `<span>${l}</span><b class="${cls(v)}">${has ? signed(v) : '—'}</b>`;
+  const val = (l, v, k) => `<span>${l}</span><b class="${cls(v)}" data-k="${esc(b.name)}:${k}">${has ? signed(v) : '—'}</b>`;
   const npos = b.paper ? (b.paper.open || []).length : b.positions.length;
   return `<a class="bot${b.paper ? ' paper' : ''}" href="#/bot/${encodeURIComponent(b.name)}" style="--bc:${botColor(b.name)}">
     <span class="dot ${b.running ? 'on' : 'off'}" aria-hidden="true"></span>
     <div class="t"><b>${esc(b.name)}${botAlarm(b.name)}</b><span>${status}</span>
       ${has ? `<span>${nf(b.equity)} USDT · ${npos} Pos.</span>` : ''}</div>
-    <div class="r pnl3">${val('realisiert', real)}${val('offen', open)}${val('zusammen', real + open)}</div>${icon.chev}</a>`;
+    ${b.paper ? '' : `<span class="spark" data-spark="${esc(b.name)}"></span>`}
+    <div class="r pnl3">${val('realisiert', real, 'r')}${val('offen', open, 'o')}${val('zus.', real + open, 'z')}</div>${icon.chev}</a>`;
 }
 
 function viewHome() {
@@ -288,7 +389,7 @@ function viewHome() {
   ${alertBar()}
   <div class="card" id="capcard">
     <span class="lbl">Gesamtkapital (alle Konten, inkl. offener Positionen)</span>
-    <span class="big">${nf(t.equity)} <small>USDT</small></span>
+    <span class="big" data-k="eq">${nf(t.equity)} <small>USDT</small></span>
     ${pnlSplit(t.pnl, t.upnl)}
     ${chartControls()}
     <div id="homechart">${SKEL}</div>
@@ -312,7 +413,7 @@ function viewPositions() {
   <div class="card" id="allpos"></div>
   ${fold('risk_worst', 'Worst Case', 'alle Stops / BTC-Szenario', `<div class="card" id="worst">${SKEL}</div>`)}
   ${fold('risk_fund', 'Funding-Uhr', 'nächste Zahlung', `<div class="card" id="funding">${SKEL}</div>`)}
-  ${fold('risk_expo', 'Wo mein Geld gerade steckt', 'Segment antippen', '<div class="card" id="expo"></div>')}`;
+  ${fold('risk_expo', 'Wo mein Geld gerade steckt', 'Zeile antippen', '<div class="card" id="expo"></div>')}`;
 }
 
 // Positionen aller Bots, gemeinsam genutzte Konten nur einmal
@@ -383,8 +484,8 @@ function viewBot(name) {
   ${b.error ? `<div class="note">Bitget-Abfrage fehlgeschlagen: ${esc(b.error)}</div>` : ''}
   ${b.shared_with.length ? `<div class="note">Gemeinsames Konto mit ${esc(b.shared_with.join(', '))} – Zahlen gelten für beide.</div>` : ''}
   <div class="card">
-    <div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Kontostand (inkl. offener Positionen)</span><span class="mid">${nf(b.equity)} USDT</span></div>
-    ${pnlSplit(b.pnl_today, b.upnl)}
+    <div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Kontostand (inkl. offener Positionen)</span><span class="mid" data-k="b:${esc(b.name)}:eq">${nf(b.equity)} USDT</span></div>
+    ${pnlSplit(b.pnl_today, b.upnl, `b:${esc(b.name)}`)}
     ${chartControls()}
     <div id="botchart">${SKEL}</div>
     <span class="lbl">Frei verfügbar: ${nf(b.available)} USDT</span>
@@ -608,6 +709,7 @@ function groupBody(g, d) {
   if (g === 'ergebnis') return `${goalCard()}
   <h2>Monatsrückblick <small>zum Wischen</small></h2><div class="card"><div id="vizM">${SKEL}</div></div>
   ${calCard(d.stats)}
+  ${viz('vizY', 'Gewinn pro Tag', '26 Wochen', 'Jedes Kästchen ein Tag (grün Gewinn, rot Verlust), darunter die Wochensumme. So siehst du gute und schlechte Phasen über ein halbes Jahr. Kästchen antippen zeigt Tag und Betrag.')}
   ${viz('vizA', 'Rückgang vom Höchststand', '90 Tage', 'Wie tief liege ich unter meinem besten Stand, und wie lange hat die Erholung gedauert?')}
   ${viz('vizP', 'Ziel-Prognose', 'bei gleichem Tempo', 'Wann wäre das Ziel erreicht, wenn es so weitergeht wie zuletzt?')}`;
   if (g === 'bots') return `${viz('vizS', 'Zeugnis &amp; Live gegen Backtest', 'Note je Bot', 'Welcher Bot läuft gut, welcher braucht Aufmerksamkeit? Die Note setzt sich aus Laufen, Live gegen Backtest, Gewinn, Rückgang und Gebühren zusammen. Zeile antippen zeigt die Begründung und den täglichen Live-Check des Bots.')}
@@ -642,7 +744,7 @@ async function loadStats(el) {
   el.innerHTML = groupBody(g, d);
   const box = (id) => document.getElementById(id);
   if (g === 'ergebnis') {
-    drawRecap(box('vizM'), d.trades, d.dd); drawDrawdown(box('vizA'), d.dd); drawForecast(box('vizP'), d.dd, state.goal);
+    drawRecap(box('vizM'), d.trades, d.dd); drawYear(box('vizY'), d.stats.days); drawDrawdown(box('vizA'), d.dd); drawForecast(box('vizP'), d.dd, state.goal);
   } else if (g === 'bots') {
     drawGrades(box('vizS'), state.bots, d.trades, d.race, d.reports); drawRace(box('vizB'), d.race);
     drawCoins(box('vizK'), d.trades); drawFees(box('vizU'), d.trades);
@@ -874,6 +976,7 @@ async function render() {
       : r.name === 'positionen' ? viewPositions() : viewHome();
   app.innerHTML = html;
   updateMinibar();
+  flashChanges();
   document.getElementById('reload')?.addEventListener('click', refresh);
   // Zurueck: in der App einen Schritt zurueck (dorthin, wo man herkam); direkt geoeffnet -> Uebersicht
   document.getElementById('back')?.addEventListener('click', (ev) => { if (navCount > 0) { ev.preventDefault(); history.back(); } });
@@ -898,8 +1001,13 @@ async function render() {
   if (bp) { const bb = state.bots.find((x) => x.name === r.arg); drawPositions(bp, (bb.paper ? bb.paper.positions || [] : bb.positions).map((p) => ({ ...p, bot: bb.name })), false, 5); }
   try {
     if (r.name === 'home') {
-      const pts = await eq('all');
-      const el = document.getElementById('homechart'); if (el) { el.innerHTML = chartWithSummary(pts); bindScrub(el, pts); }
+      // Kurve + Markierungen (Trades, Ein-/Auszahlungen, heute inkl. offen) und Mini-Kurven je Bot
+      const [pts, trades, transfers, open, race] = await Promise.all([eq('all'), cachedApi('/api/trades').catch(() => []),
+        cachedApi(`/api/transfers?bot=all&range=${ui.range}`, 300000).catch(() => []),
+        ui.range === '1T' ? api('/api/open?bot=all').catch(() => []) : [], cachedApi('/api/race?range=1W', 300000).catch(() => null)]);
+      const ex = { trades, transfers, open };
+      const el = document.getElementById('homechart'); if (el) { el.innerHTML = chartWithSummary(pts, ex); bindScrub(el, pts, ex); }
+      (race?.bots || []).forEach((s) => { const sp = app.querySelector(`[data-spark="${CSS.escape(s.name)}"]`); if (sp) sp.innerHTML = sparkSvg(s.v); });
     } else if (r.name === 'positionen') {
       const ex = document.getElementById('expo'); if (ex) drawExposure(ex, state.bots);
       const market = await api('/api/market').catch(() => null);
@@ -908,9 +1016,12 @@ async function render() {
     } else if (r.name === 'bot') {
       const b = state.bots.find((x) => x.name === r.arg);
       if (!b) return;
-      const [pts, st, trades, race, reports] = await Promise.all([eq(r.arg), api(`/api/stats?bot=${encodeURIComponent(r.arg)}`), api('/api/trades'),
-        b.paper ? null : api('/api/race?range=Alles'), b.paper ? [] : api('/api/reports')]);
-      const c = document.getElementById('botchart'); if (c) { c.innerHTML = chartWithSummary(pts); bindScrub(c, pts); }
+      const [pts, st, trades, race, reports, transfers, open] = await Promise.all([eq(r.arg), api(`/api/stats?bot=${encodeURIComponent(r.arg)}`),
+        cachedApi('/api/trades'), b.paper ? null : cachedApi('/api/race?range=Alles', 300000), b.paper ? [] : api('/api/reports'),
+        b.paper ? [] : cachedApi(`/api/transfers?bot=${encodeURIComponent(r.arg)}&range=${ui.range}`, 300000).catch(() => []),
+        !b.paper && ui.range === '1T' ? api(`/api/open?bot=${encodeURIComponent(r.arg)}`).catch(() => []) : []]);
+      const ex = { trades: trades.filter((x) => x.bot === r.arg), transfers, open };
+      const c = document.getElementById('botchart'); if (c) { c.innerHTML = chartWithSummary(pts, ex); bindScrub(c, pts, ex); }
       const t = document.getElementById('bottrades'); if (t) t.innerHTML = tradeRows(st.trades, false);
       const k = document.getElementById('botcoins'); if (k) drawCoins(k, trades, r.arg);
       const fe = document.getElementById('botfees'); if (fe) drawFees(fe, trades.filter((x) => x.bot === r.arg));
