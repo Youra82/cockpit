@@ -24,10 +24,13 @@ function setFrom(v) {
   render();
 }
 const todayIso = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
-// Datumsfeld "ab ..." (oeffnet auf dem iPhone die Datumsauswahl) + Knopf zum Zuruecksetzen
-const fromChip = (label = 'ab') => `<span class="datechip${pref.from ? ' on' : ''}"><label>${label}
-  <input type="date" data-from value="${pref.from || ''}" max="${todayIso()}" aria-label="Startdatum für alle Grafiken"></label>
-  ${pref.from ? '<button type="button" data-fromclear aria-label="Startdatum zurücksetzen">✕</button>' : ''}</span>`;
+// Kalender-Knopf in der Zeitraum-Leiste: unsichtbares Datumsfeld darueber oeffnet die Datumsauswahl des iPhones.
+// Gesetzt: "ab 01.10." + Knopf zum Zuruecksetzen.
+const CAL_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>';
+const fromLabel = () => (pref.from ? `${pref.from.slice(8, 10)}.${pref.from.slice(5, 7)}.${pref.from.slice(2, 4)}` : '');
+const calBtn = () => `<label class="calbtn${pref.from ? ' on' : ''}">${CAL_ICON}${pref.from ? `<span>ab ${fromLabel()}</span>` : ''}
+  <input type="date" data-from value="${pref.from || ''}" max="${todayIso()}" aria-label="Startdatum für alle Grafiken wählen"></label>
+  ${pref.from ? '<button type="button" class="calx" data-fromclear aria-label="Startdatum entfernen">✕</button>' : ''}`;
 
 // ------------------------------------------------------------------ Helfer
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -90,15 +93,14 @@ function pnlSplit(real, open, key = 'tot') {
 
 // Zeitraum- und Modus-Umschalter ueber jedem Diagramm
 function chartControls() {
-  // Zeitraum-Knoepfe sind aus, solange ein Startdatum gewaehlt ist
-  const seg = (key, opts) => `<div class="seg sm" role="group">${opts.map(([v, l]) =>
-    `<button data-${key}="${v}" class="${ui[key] === v && !(key === 'range' && pref.from) ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+  const btns = (key, opts) => opts.map(([v, l]) => `<button type="button" data-${key}="${v}" class="${ui[key] === v ? 'on' : ''}">${l}</button>`).join('');
+  // Mit Startdatum: statt Heute/1W/1M/90T nur "ab Datum ✕" (gilt fuer alle Grafiken)
+  const range = pref.from ? calBtn() : `${btns('range', [['1T', 'Heute'], ['1W', '1W'], ['1M', '1M'], ['Alles', '90T']])}${calBtn()}`;
   // Wertfeld fuer den Finger auf der Kurve: fester Platz oben rechts, damit der Finger es nicht verdeckt
   return `<div class="ctrls">
-    ${seg('mode', [['gewinn', 'Gewinn'], ['konto', 'Konto']])}
-    ${seg('range', [['1T', 'Heute'], ['1W', '1W'], ['1M', '1M'], ['Alles', '90T']])}
-    <div class="stip" aria-live="polite"></div></div>
-    <div class="ctrls2">${fromChip()}${pref.from ? '<span class="lbl">gilt für alle Grafiken</span>' : '<span class="lbl">oder Startdatum wählen – gilt für alle Grafiken</span>'}</div>`;
+    <div class="seg sm" role="group" aria-label="Kurvenart">${btns('mode', [['gewinn', 'Gewinn'], ['konto', 'Konto']])}</div>
+    <div class="seg sm" role="group" aria-label="Zeitraum">${range}</div>
+    <div class="stip" aria-live="polite"></div></div>`;
 }
 
 // Kapitalkurve mit Markierungen. ex = { trades, transfers, open } (alles optional):
@@ -720,7 +722,8 @@ function viewStats() {
   <div class="tabseg" role="tablist" aria-label="Bereich">${GROUPS.map(([k, l]) => `<button type="button" role="tab" data-atab="${k}"
     aria-selected="${k === g}" class="${k === g ? 'on' : ''}">${l}</button>`).join('')}</div>
   ${nh ? `<a class="hint" href="#/system"><span class="grow">Ohne ${nh} ausgeblendete${nh > 1 ? '' : 'n'} Bot${nh > 1 ? 's' : ''}</span><b>ändern ›</b></a>` : ''}
-  <div class="ctrls2">${fromChip('Zeitraum ab')}<span class="lbl">${pref.from ? 'gilt für alle Grafiken' : 'leer = letzte 90 Tage'}</span></div>
+  <div class="rangebar"><span class="lbl">Zeitraum</span><div class="seg sm" role="group" aria-label="Zeitraum">
+    ${pref.from ? '' : '<button type="button" class="on" aria-pressed="true">letzte 90 Tage</button>'}${calBtn()}</div></div>
   <div id="statsbody"><div class="card">${SKEL}</div></div>`;
 }
 
@@ -1043,7 +1046,11 @@ async function render() {
   document.getElementById('back')?.addEventListener('click', (ev) => { if (navCount > 0) { ev.preventDefault(); history.back(); } });
 
   app.querySelectorAll('[data-range]').forEach((b) => b.addEventListener('click', () => { ui.range = b.dataset.range; setFrom(null); }));
-  app.querySelectorAll('[data-from]').forEach((inp) => inp.addEventListener('change', () => setFrom(inp.value || null)));
+  app.querySelectorAll('[data-from]').forEach((inp) => {
+    inp.addEventListener('change', () => setFrom(inp.value || null));
+    // Desktop: ganzer Knopf oeffnet den Kalender (iPhone oeffnet ihn beim Antippen ohnehin)
+    inp.addEventListener('click', () => { try { inp.showPicker(); } catch (e) { /* nicht unterstuetzt */ } });
+  });
   app.querySelectorAll('[data-fromclear]').forEach((b) => b.addEventListener('click', () => setFrom(null)));
   app.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => { ui.mode = b.dataset.mode; render(); }));
   app.querySelectorAll('[data-sort]').forEach((b) => b.addEventListener('click', () => { pref.sort = b.dataset.sort; savePref(); render(); }));

@@ -484,3 +484,13 @@ svg.viz text { font-size: 10.5px; fill: var(--muted); }
 .li.tl { align-items: flex-start; }
 .li.tl small { display: block; font-size: 11.5px; line-height: 1.4; margin-top: 2px; white-space: normal; }
 .li.tl .grow { white-space: normal; }
+/* Kalender-Knopf in der Zeitraum-Leiste (ersetzt das grosse Datumsfeld) */
+.calbtn { position: relative; display: inline-flex; align-items: center; gap: 5px; padding: 5px 9px; min-height: 32px; border-radius: 8px; color: var(--muted); font-size: 11.5px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.calbtn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; flex: none; }
+.calbtn.on { background: #2A3140; color: var(--text); }
+.calbtn.on svg { color: var(--accent); }
+.calbtn input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; border: 0; padding: 0; margin: 0; font-size: 16px; cursor: pointer; color-scheme: dark; }
+.calbtn input::-webkit-calendar-picker-indicator { position: absolute; inset: 0; width: 100%; height: 100%; cursor: pointer; }
+.calx { border: 0; background: transparent; color: var(--muted); font-size: 13px; width: 30px; min-height: 32px; border-radius: 8px; cursor: pointer; }
+.calx:active { background: #2A3140; }
+.rangebar { display: flex; align-items: center; justify-content: space-between; gap: 10px; }.rangebar .seg { background: var(--card); border: 1px solid var(--line); }
