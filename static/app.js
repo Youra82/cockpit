@@ -17,10 +17,13 @@ const isFolded = (key, def) => (key in pref.fold ? pref.fold[key] : def);
 // ------------------------------------------------------------------ Helfer
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const nf = (v, d = 2) => v == null || isNaN(v) ? '—' : Number(v).toLocaleString('de-DE', { minimumFractionDigits: d, maximumFractionDigits: d });
-const signed = (v, d = 2) => v == null || isNaN(v) ? '—' : (v > 0 ? '+' : v < 0 ? '−' : '±') + nf(Math.abs(v), d);
-const cls = (v) => v > 0 ? 'up' : v < 0 ? 'down' : 'muted';
+// Null (gerundet) als ruhiger Strich statt "±0,00"
+const isZero = (v, d = 2) => Math.abs(v) < 0.5 * 10 ** -d;
+const signed = (v, d = 2) => v == null || isNaN(v) ? '—' : isZero(v, d) ? '–' : (v > 0 ? '+' : '−') + nf(Math.abs(v), d);
+const cls = (v) => v == null || isNaN(v) || isZero(v) ? 'muted' : v > 0 ? 'up' : 'down';
 const price = (v) => v == null ? '—' : nf(v, v >= 100 ? 2 : v >= 1 ? 4 : Math.max(6, Math.min(10, 3 - Math.floor(Math.log10(Math.abs(v) || 1)))));
-const coin = (sym) => String(sym || '').split(':')[0];
+const coin = (sym) => String(sym || '').split(':')[0].split('/')[0];   // nur der Coin: "BTC/USDT:USDT" -> "BTC"
+const SKEL = '<div class="skel" role="status" aria-label="lädt"></div>';
 function ago(ts) {
   if (!ts) return 'unbekannt';
   const s = Date.now() / 1000 - (ts > 1e11 ? ts / 1000 : ts);
@@ -71,11 +74,11 @@ function pnlSplit(real, open) {
 
 // Zeitraum- und Modus-Umschalter ueber jedem Diagramm
 function chartControls() {
-  const seg = (key, opts) => `<div class="seg" role="group">${opts.map(([v, l]) =>
+  const seg = (key, opts) => `<div class="seg sm" role="group">${opts.map(([v, l]) =>
     `<button data-${key}="${v}" class="${ui[key] === v ? 'on' : ''}">${l}</button>`).join('')}</div>`;
   // Wertfeld fuer den Finger auf der Kurve: fester Platz oben rechts, damit der Finger es nicht verdeckt
   return `<div class="ctrls">
-    ${seg('mode', [['gewinn', 'Gewinn'], ['konto', 'Kontostand']])}
+    ${seg('mode', [['gewinn', 'Gewinn'], ['konto', 'Konto']])}
     ${seg('range', [['1T', 'Heute'], ['1W', '1W'], ['1M', '1M'], ['Alles', '90T']])}
     <div class="stip" aria-live="polite"></div></div>`;
 }
@@ -169,18 +172,46 @@ function fold(key, title, sub, body, def = false) {
     <div class="foldb">${body}</div></section>`;
 }
 
-// Alarme der angezeigten Bots (ausgeblendete Bots liefern nur markierte, kritische Alarme)
-const liveAlerts = () => state.alerts.filter((a) => !a.hidden);
+// Offene Alarme: angezeigte Bots, noch nicht als "Gesehen" markiert
+const liveAlerts = () => state.alerts.filter((a) => !a.hidden && !a.seen);
+// Gleiche Art beim gleichen Bot zu einer Zeile zusammenfassen (z. B. "Liquidation 3x")
+function groupAlerts(list) {
+  const m = new Map();
+  for (const a of list) {
+    const k = `${a.bot}|${a.title}`;
+    if (!m.has(k)) m.set(k, { ...a, items: [] });
+    m.get(k).items.push(a);
+  }
+  return [...m.values()];
+}
+// Ein (zusammengefasster) Alarm als Karte, mit Knopf "Gesehen" bzw. "Zurückholen"
+function alertCard(g, back) {
+  const keys = esc(JSON.stringify([...new Set(g.items.map((x) => x.key))]));
+  const lines = g.items.slice(0, 4).map((x) => `<span>${esc(x.text)}</span>`).join('');
+  return `<div class="alert ${g.level}"${g.bot ? ` style="--bc:${botColor(g.bot)}"` : ''}><span class="ic" aria-hidden="true">!</span>
+    <div class="t"><b>${esc(g.title)}${g.bot ? ` <span class="muted" style="font-weight:400">· ${esc(g.bot)}</span>` : ''}${g.items.length > 1 ? ` <span class="pill ${g.level}">${g.items.length}×</span>` : ''}</b>
+    ${lines}${g.items.length > 4 ? `<span>+ ${g.items.length - 4} weitere</span>` : ''}
+    <button type="button" class="btn ghost sm seenbtn" data-seen="${keys}" data-back="${back ? 1 : ''}">${back ? 'Zurückholen' : 'Gesehen'}</button></div></div>`;
+}
+// "aktualisiert vor ..." -- wird orange ab 5 min, rot ab 15 min oder wenn der Server nicht antwortet
+function freshHtml(failed) {
+  const age = state && state.updated ? Date.now() / 1000 - state.updated : 0;
+  const lvl = failed || age > 900 ? 'down' : age > 300 ? 'warn' : '';
+  const txt = failed ? `Server nicht erreichbar · Stand ${ago(state.updated)}` : age > 900 ? `Stand ${ago(state.updated)} – Server antwortet nicht?`
+    : `aktualisiert ${ago(state.updated)}`;
+  return `<span id="fresh" class="fresh ${lvl}">${txt}</span>`;
+}
 const shortAlert = {
   'Position ohne Stop-Loss': 'kein SL', 'Bot läuft nicht': 'steht', 'Order ohne Position': 'Order ohne Pos.',
   'Liquidation vor Stop-Loss': 'Liq. vor SL', 'Nahe an der Liquidation': 'nahe Liq.', Liquidation: 'liquidiert',
   'Bitget-Abfrage fehlgeschlagen': 'Abfrage-Fehler', 'Papierkonto aktualisiert sich nicht': 'veraltet',
 };
 function botAlarm(name) {
-  const a = liveAlerts().filter((x) => x.bot === name && x.level !== 'info');
+  // "Bot läuft nicht" zeigen schon Punkt und Statuszeile -- nur echte Probleme als Markierung
+  const a = liveAlerts().filter((x) => x.bot === name && x.level !== 'info' && x.title !== 'Bot läuft nicht');
   if (!a.length) return '';
-  const lvl = a.some((x) => x.level === 'crit') ? 'crit' : 'warn';
-  return `<span class="pill ${lvl}">${a.length > 1 ? `${a.length} Alarme` : esc(shortAlert[a[0].title] || 'Alarm')}</span>`;
+  const lvl = a.some((x) => x.level === 'crit') ? 'crit' : 'warn', n = groupAlerts(a).length;
+  return `<span class="pill ${lvl}">${n > 1 ? `${n} Alarme` : esc(shortAlert[a[0].title] || 'Alarm')}</span>`;
 }
 
 // Reihenfolge der Bots: fest (wie in config.json), nach Gewinn heute oder nach Kontostand
@@ -207,14 +238,32 @@ function header(title, sub, back) {
 function alertBar() {
   const a = liveAlerts().filter((x) => x.level !== 'info');
   if (!a.length) return '';
+  const g = groupAlerts(a);
   const closed = isFolded('alertbar', false), crit = a.some((x) => x.level === 'crit');
+  const n = (x) => (x.items.length > 1 ? ` ${x.items.length}×` : '');
   return `<section class="abar ${crit ? 'crit' : 'warn'}${closed ? ' closed' : ''}" data-fold="alertbar">
     <button type="button" class="foldh" aria-expanded="${!closed}"><span class="aic" aria-hidden="true">!</span>
-      <span class="t"><b>${a.length} Alarm${a.length > 1 ? 'e' : ''}</b>
-      <span class="sum">${a.slice(0, 3).map((x) => esc((x.bot ? `${x.bot}: ` : '') + (shortAlert[x.title] || x.title))).join(' · ')}</span></span>${icon.chev}</button>
-    <div class="foldb">${a.slice(0, 6).map((x) => `<a class="abi" href="${x.bot ? `#/bot/${encodeURIComponent(x.bot)}` : '#/alarme'}">
-      <b>${esc(x.title)}${x.bot ? ` <span>· ${esc(x.bot)}</span>` : ''}</b><span>${esc(x.text)}</span></a>`).join('')}
-      <a class="abl" href="#/alarme">${a.length > 6 ? `+ ${a.length - 6} weitere · ` : ''}Alle Alarme und Zeitleiste ›</a></div></section>`;
+      <span class="t"><b>${g.length} Alarm${g.length > 1 ? 'e' : ''}</b>
+      <span class="sum">${g.slice(0, 3).map((x) => esc((x.bot ? `${x.bot}: ` : '') + (shortAlert[x.title] || x.title) + n(x))).join(' · ')}</span></span>${icon.chev}</button>
+    <div class="foldb">${g.slice(0, 5).map((x) => `<a class="abi" href="${x.bot ? `#/bot/${encodeURIComponent(x.bot)}` : '#/alarme'}">
+      <b>${esc(x.title)}${n(x)}${x.bot ? ` <span>· ${esc(x.bot)}</span>` : ''}</b><span>${esc(x.items[0].text)}${x.items.length > 1 ? ` (+${x.items.length - 1})` : ''}</span></a>`).join('')}
+      <a class="abl" href="#/alarme">${g.length > 5 ? `+ ${g.length - 5} weitere · ` : ''}Alle Alarme, „Gesehen“ und Zeitleiste ›</a></div></section>`;
+}
+
+// Abstand zum Stop-Loss in % (ohne SL: null)
+const slDist = (p) => (p.sl && p.mark ? Math.abs(p.mark / p.sl - 1) * 100 : null);
+
+// Kurzfassung der Positionen fuer die Uebersicht -- die ganze Liste steht im Tab Positionen
+function posCard() {
+  const rows = allPositions();
+  if (!rows.length) return '';
+  const tot = rows.reduce((s, p) => s + (p.upnl || 0), 0);
+  const nosl = rows.filter((p) => !p.sl).length;
+  const near = rows.filter((p) => slDist(p) != null).sort((a, b) => slDist(a) - slDist(b))[0];
+  return `<a class="card poscard" href="#/positionen" style="--bc:${near ? botColor(near.bot) : 'var(--line)'}">
+    <div class="row2"><b>Offene Positionen</b><span class="muted">${rows.length} in ${new Set(rows.map((p) => p.bot)).size} Bots ›</span></div>
+    <div class="row2"><span class="lbl">Offen zusammen</span><b class="mono ${cls(tot)}">${signed(tot)} USDT</b></div>
+    <div class="lbl">${near ? `Am nächsten am Stop: <b>${esc(coin(near.symbol))}</b> (${esc(near.bot)}) ${nf(slDist(near), 1)} %` : ''}${nosl ? `${near ? ' · ' : ''}<span class="down">${nosl} ohne SL</span>` : ''}</div></a>`;
 }
 
 function botRow(b) {
@@ -224,7 +273,7 @@ function botRow(b) {
   const has = b.paper || b.has_key, real = b.pnl_today || 0, open = b.upnl || 0;
   const val = (l, v) => `<span>${l}</span><b class="${cls(v)}">${has ? signed(v) : '—'}</b>`;
   const npos = b.paper ? (b.paper.open || []).length : b.positions.length;
-  return `<a class="bot${b.paper ? ' paper' : ''}" href="#/bot/${encodeURIComponent(b.name)}">
+  return `<a class="bot${b.paper ? ' paper' : ''}" href="#/bot/${encodeURIComponent(b.name)}" style="--bc:${botColor(b.name)}">
     <span class="dot ${b.running ? 'on' : 'off'}" aria-hidden="true"></span>
     <div class="t"><b>${esc(b.name)}${botAlarm(b.name)}</b><span>${status}</span>
       ${has ? `<span>${nf(b.equity)} USDT · ${npos} Pos.</span>` : ''}</div>
@@ -235,14 +284,14 @@ function viewHome() {
   const t = totals(state.bots);
   const bots = sortedBots(state.bots.filter((b) => !b.paper)), paper = state.bots.filter((b) => b.paper);
   const nh = hiddenCount();
-  return `${header('Bot-Cockpit', `Bitget · aktualisiert ${ago(state.updated)}`)}
+  return `${header('Bot-Cockpit', `Bitget · ${freshHtml()}`)}
   ${alertBar()}
-  <div class="card">
+  <div class="card" id="capcard">
     <span class="lbl">Gesamtkapital (alle Konten, inkl. offener Positionen)</span>
     <span class="big">${nf(t.equity)} <small>USDT</small></span>
     ${pnlSplit(t.pnl, t.upnl)}
     ${chartControls()}
-    <div id="homechart"><div class="empty">lädt …</div></div>
+    <div id="homechart">${SKEL}</div>
   </div>
   <div class="tiles">
     <div class="tile"><span class="lbl">Bots aktiv</span><b>${t.running} / ${state.bots.length}</b></div>
@@ -252,12 +301,18 @@ function viewHome() {
   <div class="h2row"><div><b>Meine Bots</b><span class="lbl">heute realisiert + offen</span></div>${sortSeg()}</div>
   ${bots.map(botRow).join('')}
   ${nh ? `<a class="hint" href="#/system"><span class="grow">${nh} weitere${nh > 1 ? '' : 'r'} Bot${nh > 1 ? 's' : ''} erkannt, ausgeblendet</span><b>System ›</b></a>` : ''}
-  ${paper.length ? `<h2>Papierkonten <small>zählen nicht zum Gesamtkapital</small></h2>${paper.map(botRow).join('')}` : ''}
-  ${fold('pos', 'Offene Positionen', `${t.positions} in ${state.bots.filter((b) => b.positions.length).length} Bots · antippen`, '<div class="card" id="allpos"></div>')}
-  ${fold('risk', 'Risiko jetzt', 'Worst Case · Funding · Verteilung', `
-    <h3>Worst Case <small>alle Stops / BTC-Szenario</small></h3><div class="card" id="worst"><div class="empty">lädt …</div></div>
-    <h3>Funding-Uhr <small>nächste Zahlung</small></h3><div class="card" id="funding"><div class="empty">lädt …</div></div>
-    <h3>Wo mein Geld gerade steckt <small>Segment antippen</small></h3><div class="card" id="expo"></div>`)}`;
+  ${posCard()}
+  ${paper.length ? `<h2>Papierkonten <small>zählen nicht zum Gesamtkapital</small></h2>${paper.map(botRow).join('')}` : ''}`;
+}
+
+// Tab Positionen: alle offenen Positionen plus Risiko (Worst Case, Funding, Verteilung)
+function viewPositions() {
+  const rows = allPositions();
+  return `${header('Positionen', `${rows.length} offen in ${new Set(rows.map((p) => p.bot)).size} Bots · antippen`)}
+  <div class="card" id="allpos"></div>
+  ${fold('risk_worst', 'Worst Case', 'alle Stops / BTC-Szenario', `<div class="card" id="worst">${SKEL}</div>`)}
+  ${fold('risk_fund', 'Funding-Uhr', 'nächste Zahlung', `<div class="card" id="funding">${SKEL}</div>`)}
+  ${fold('risk_expo', 'Wo mein Geld gerade steckt', 'Segment antippen', '<div class="card" id="expo"></div>')}`;
 }
 
 // Positionen aller Bots, gemeinsam genutzte Konten nur einmal
@@ -285,7 +340,7 @@ function viewPaper(b) {
     <span class="lbl">Rendite seit Start (ohne Einzahlungen): <b class="${cls(ren)}">${ren == null ? '—' : (ren >= 0 ? '+' : '') + ren.toFixed(2) + ' %'}</b> · Start ${nf(p.start)} USDT${p.einzahlungen ? ` · Einzahlungen ${nf(p.einzahlungen)}` : ''}</span>
     <span class="lbl">Heute ${signed(p.pnl_today)} USDT (${p.trades_today || 0} Trades) · gesamt ${signed(p.pnl_total)} USDT in ${p.trades_total || 0} Trades · Treffer ${p.trades_total ? Math.round(100 * p.wins / p.trades_total) : 0} % · Einsatzfaktor ${p.mult ? '×' + String(p.mult).replace('.', ',') : '—'}</span>
     ${chartControls()}
-    <div id="botchart"><div class="empty">lädt …</div></div>
+    <div id="botchart">${SKEL}</div>
     <span class="lbl">Frei verfügbar: ${nf(b.available)} USDT</span>
   </div>
   <h2>Offene Positionen <small>${(p.positions || []).length} · Papier</small></h2>
@@ -331,22 +386,21 @@ function viewBot(name) {
     <div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Kontostand (inkl. offener Positionen)</span><span class="mid">${nf(b.equity)} USDT</span></div>
     ${pnlSplit(b.pnl_today, b.upnl)}
     ${chartControls()}
-    <div id="botchart"><div class="empty">lädt …</div></div>
+    <div id="botchart">${SKEL}</div>
     <span class="lbl">Frei verfügbar: ${nf(b.available)} USDT</span>
   </div>
   <h2>Offene Positionen <small>${b.positions.length}</small></h2>
   <div class="card" id="botpos"></div>
   ${otherOrders.length ? fold('orders', 'Wartende Orders', `${otherOrders.length} · ${[...new Set(otherOrders.map((o) => coin(o.symbol).split('/')[0]))].slice(0, 3).map(esc).join(', ')}`,
-    `<div class="card tight">${otherOrders.slice(0, 8).map((o) => `<div class="li"><span class="grow">${esc(coin(o.symbol))}</span>
+    `<div class="card tight">${moreList(otherOrders.map((o) => `<div class="li"><span class="grow">${esc(coin(o.symbol))}</span>
       <span class="muted">${o.kind === 'trail' ? 'Trailing' : o.kind === 'trigger' ? 'Trigger' : 'Limit'} ${esc(o.side || '')}</span>
-      <span class="mono">${price(o.trigger || o.price)}</span></div>`).join('')}
-      ${otherOrders.length > 8 ? `<div class="li muted">… und ${otherOrders.length - 8} weitere</div>` : ''}</div>`, true) : ''}
+      <span class="mono">${price(o.trigger || o.price)}</span></div>`))}</div>`, true) : ''}
   <h2>Letzte Trades <small>antippen für Chart</small></h2>
-  <div class="card tight" id="bottrades"><div class="empty">lädt …</div></div>
+  <div class="card tight" id="bottrades">${SKEL}</div>
   <h2>Welche Coins bringen Geld? <small>90 Tage</small></h2>
-  <div class="card" id="botcoins"><div class="empty">lädt …</div></div>
+  <div class="card" id="botcoins">${SKEL}</div>
   <h2>Gebühren <small>30 Tage</small></h2>
-  <div class="card" id="botfees"><div class="empty">lädt …</div></div>
+  <div class="card" id="botfees">${SKEL}</div>
   ${b.git ? `<div class="lbl" style="text-align:center">Version ${esc(b.git.hash)} · ${esc(b.git.subject)}</div>` : ''}`;
 }
 
@@ -402,32 +456,42 @@ function ladder(p, slFirst, liqCol) {
       ${p.liq ? `<span><i style="background:${liqCol}"></i>${showLiq ? 'L = ' : ''}Liquidation ${price(p.liq)} · <b class="mono" style="color:${liqCol}">${nf(p.liq_pct, 1)} %</b>${slFirst ? ' · SL greift vorher' : ''}</span>` : ''}</div>`;
 }
 
-function tradeRows(trades, withBot) {
-  if (!trades.length) return '<div class="empty">Noch keine geschlossenen Trades</div>';
-  return trades.slice(0, 25).map((t) => `<a class="li" href="#/trade/${encodeURIComponent(t.pid)}">
-    <span class="muted" style="width:86px">${timeStr(t.utime)}</span>
-    <span class="grow">${esc(coin(t.symbol))} <span class="muted">${esc(t.side || '')}${withBot ? ' · ' + esc(t.bot || '') : ''}</span></span>
-    <b class="mono ${cls(t.net)}">${signed(t.net)}</b>${icon.chev}</a>`).join('');
+// Lange Listen: zuerst n Zeilen, der Rest hinter "alle zeigen"
+function moreList(rows, n = 5) {
+  if (rows.length <= n) return rows.join('');
+  return `${rows.slice(0, n).join('')}<div class="morebox" hidden>${rows.slice(n).join('')}</div>
+    <button type="button" class="showmore">alle ${rows.length} zeigen</button>`;
 }
 
-const ALERT_FOLDS = ['al_crit', 'al_warn', 'al_info', 'al_hid', 'al_tl'];
+function tradeRows(trades, withBot) {
+  if (!trades.length) return '<div class="empty">Noch keine geschlossenen Trades</div>';
+  return moreList(trades.slice(0, 25).map((t) => `<a class="li" href="#/trade/${encodeURIComponent(t.pid)}">
+    <span class="muted" style="width:86px">${timeStr(t.utime)}</span>
+    <span class="grow">${t.bot && withBot ? `<i class="bdot" style="background:${botColor(t.bot)}"></i>` : ''}${esc(coin(t.symbol))} <span class="muted">${esc(t.side || '')}${withBot ? ' · ' + esc(t.bot || '') : ''}</span></span>
+    <b class="mono ${cls(t.net)}">${signed(t.net)}</b>${icon.chev}</a>`));
+}
+
+const ALERT_FOLDS = ['al_crit', 'al_warn', 'al_info', 'al_hid', 'al_seen', 'al_tl'];
 function viewAlerts() {
-  const live = liveAlerts(), hid = state.alerts.filter((a) => a.hidden);
-  const card = (x) => `<div class="alert ${x.level}"><span class="ic" aria-hidden="true">!</span>
-    <div class="t"><b>${esc(x.title)}${x.bot ? ` <span class="muted" style="font-weight:400">· ${esc(x.bot)}</span>` : ''}</b>
-    <span>${esc(x.text)}</span></div></div>`;
-  const grp = (key, title, lvl, list, def) => (list.length ? fold(key, `${title} <span class="pill ${lvl}">${list.length}</span>`,
-    [...new Set(list.map((x) => x.bot || 'alle'))].slice(0, 3).map(esc).join(', '), `<div class="alist">${list.map(card).join('')}</div>`, def) : '');
-  const open = ALERT_FOLDS.some((k) => !isFolded(k, k === 'al_info' || k === 'al_hid'));
-  const n = live.filter((a) => a.level !== 'info').length;
-  return `${header('Alarme', `${n} offen${hid.length ? ` · ${hid.length} von ausgeblendeten Bots` : ''}`)}
-  <div class="row" style="justify-content:flex-end"><button class="btn ghost sm" id="foldall" type="button">${open ? 'Alle einklappen' : 'Alle aufklappen'}</button></div>
-  ${live.length ? '' : '<div class="ok">Alles in Ordnung – kein Alarm.</div>'}
+  const live = liveAlerts(), hid = state.alerts.filter((a) => a.hidden && !a.seen), seen = state.alerts.filter((a) => a.seen);
+  const grp = (key, title, lvl, list, def, back) => {
+    if (!list.length) return '';
+    const g = groupAlerts(list);
+    return fold(key, `${title} <span class="pill ${lvl}">${g.length}</span>`, [...new Set(list.map((x) => x.bot || 'alle'))].slice(0, 3).map(esc).join(', '),
+      `<div class="alist">${g.map((x) => alertCard(x, back)).join('')}</div>`, def);
+  };
+  const open = ALERT_FOLDS.some((k) => !isFolded(k, ['al_info', 'al_hid', 'al_seen'].includes(k)));
+  const n = groupAlerts(live.filter((a) => a.level !== 'info')).length;
+  return `${header('Alarme', `${n} offen${seen.length ? ` · ${groupAlerts(seen).length} gesehen` : ''}${hid.length ? ` · ${hid.length} von ausgeblendeten Bots` : ''}`)}
+  <div class="row" style="justify-content:space-between;align-items:center"><span class="lbl">Gleiche Alarme sind zusammengefasst. „Gesehen“ gilt auf allen Geräten, bis sich etwas ändert.</span>
+    <button class="btn ghost sm" id="foldall" type="button" style="flex:none">${open ? 'Alle einklappen' : 'Alle aufklappen'}</button></div>
+  ${live.length ? '' : '<div class="ok">Alles in Ordnung – kein offener Alarm.</div>'}
   ${grp('al_crit', 'Kritisch', 'crit', live.filter((a) => a.level === 'crit'), false)}
   ${grp('al_warn', 'Warnung', 'warn', live.filter((a) => a.level === 'warn'), false)}
   ${grp('al_info', 'Hinweise', 'info', live.filter((a) => a.level === 'info'), true)}
   ${grp('al_hid', 'Ausgeblendete Bots', 'info', hid, true)}
-  ${fold('al_tl', 'Was ist passiert?', 'letzte 7 Tage', '<div class="card" id="timeline"><div class="empty">lädt …</div></div>')}
+  ${grp('al_seen', 'Gesehen', 'info', seen, true, true)}
+  ${fold('al_tl', 'Was ist passiert?', 'letzte 7 Tage', `<div class="card" id="timeline">${SKEL}</div>`)}
   <div class="lbl" style="text-align:center">Geprüft: Bot läuft, Stop-Loss vorhanden, Abstand zur Liquidation, gleiche Coins in mehreren Bots, Orders ohne Position, Bitget erreichbar. Mitteilungen einstellen: unter System.</div>`;
 }
 
@@ -497,12 +561,12 @@ function viewStats() {
   <div class="tabseg" role="tablist" aria-label="Bereich">${GROUPS.map(([k, l]) => `<button type="button" role="tab" data-atab="${k}"
     aria-selected="${k === g}" class="${k === g ? 'on' : ''}">${l}</button>`).join('')}</div>
   ${nh ? `<a class="hint" href="#/system"><span class="grow">Ohne ${nh} ausgeblendete${nh > 1 ? '' : 'n'} Bot${nh > 1 ? 's' : ''}</span><b>ändern ›</b></a>` : ''}
-  <div id="statsbody"><div class="card"><div class="empty">lädt …</div></div></div>`;
+  <div id="statsbody"><div class="card">${SKEL}</div></div>`;
 }
 
 // Ueberschrift mit i-Knopf; die Erklaerung steht in der Karte und ist nur auf Wunsch sichtbar
 const viz = (id, title, sub, q) => `<h2>${title} <span class="h2r"><small>${sub}</small><button type="button" class="ibtn" aria-label="Erklärung: ${title}">i</button></span></h2>
-  <div class="card"><p class="q"${pref.explain ? '' : ' hidden'}>${q}</p><div id="${id}"><div class="empty">lädt …</div></div></div>`;
+  <div class="card"><p class="q"${pref.explain ? '' : ' hidden'}>${q}</p><div id="${id}">${SKEL}</div></div>`;
 
 function goalCard() {
   const t = totals(state.bots), g = state.goal;
@@ -542,7 +606,7 @@ function calCard(s) {
 
 function groupBody(g, d) {
   if (g === 'ergebnis') return `${goalCard()}
-  <h2>Monatsrückblick <small>zum Wischen</small></h2><div class="card"><div id="vizM"><div class="empty">lädt …</div></div></div>
+  <h2>Monatsrückblick <small>zum Wischen</small></h2><div class="card"><div id="vizM">${SKEL}</div></div>
   ${calCard(d.stats)}
   ${viz('vizA', 'Rückgang vom Höchststand', '90 Tage', 'Wie tief liege ich unter meinem besten Stand, und wie lange hat die Erholung gedauert?')}
   ${viz('vizP', 'Ziel-Prognose', 'bei gleichem Tempo', 'Wann wäre das Ziel erreicht, wenn es so weitergeht wie zuletzt?')}`;
@@ -555,15 +619,19 @@ function groupBody(g, d) {
   ${viz('vizE', 'Wann verdienen die Bots?', '90 Tage', 'Summe der Trades je Wochentag und Stunde, in der sie geschlossen wurden. Feld antippen.')}
   <h2>Letzte Trades <small>${d.stats.totals.count || 0} in 90 Tagen · antippen für Chart</small></h2>
   <div class="card tight">${tradeRows(d.stats.trades, true)}</div>`;
-  return `${viz('vizQ', 'Marktphase jetzt', 'BTC Tageschart', 'In welcher Phase ist der Markt, und wie schneiden deine Bots in genau dieser Phase ab?')}
+  const zc = (d.zones && d.zones.coins) || [], za = (art) => zc.filter((c) => c.art === art).length;
+  return `<a class="card zlink" href="#/zonen"><div class="row2"><b>Zonen: Treppe &amp; Aufzug</b><span class="muted">öffnen ›</span></div>
+    <span class="lbl">${zc.length ? `${zc.length} Coins · Aufzug ${za('Aufzug')} · Treppe ${za('Treppe')} · Rückprall ${za('Rückprall')} · Stand ${ago(d.zones.ts)}`
+      : 'wird berechnet …'}</span></a>
+  ${viz('vizQ', 'Marktphase jetzt', 'BTC Tageschart', 'In welcher Phase ist der Markt, und wie schneiden deine Bots in genau dieser Phase ab?')}
   ${viz('vizO', 'Bots gegen BTC halten', 'beide ab 100', 'Hätten die Bots mehr gebracht, als das Geld einfach in BTC zu stecken? Finger über die Kurve.')}`;
 }
 
-const NEEDS = { ergebnis: ['stats', 'trades', 'dd'], bots: ['trades', 'race', 'reports'], trades: ['stats', 'trades'], markt: ['trades', 'dd', 'market'] };
+const NEEDS = { ergebnis: ['stats', 'trades', 'dd'], bots: ['trades', 'race', 'reports'], trades: ['stats', 'trades'], markt: ['trades', 'dd', 'market', 'zones'] };
 const FETCH = {
   stats: () => api('/api/stats?bot=all'), trades: () => api('/api/trades'), race: () => api('/api/race?range=Alles'),
   dd: () => api('/api/equity?bot=all&range=Alles&mode=gewinn'), reports: () => api('/api/reports'),
-  market: () => api('/api/market').catch(() => null),
+  market: () => api('/api/market').catch(() => null), zones: () => api('/api/zones').catch(() => null),
 };
 
 async function loadStats(el) {
@@ -626,7 +694,7 @@ function viewSystem() {
       <span class="mono">${b.git ? esc(b.git.hash) + ' · ' + new Date(b.git.date).toLocaleDateString('de-DE') : 'keine Git-Version'}</span>
       <span>letzter Lauf ${ago(b.last_activity)}</span>
       <span>alle ${b.cycle} min</span></div></div>`).join('')}</div>
-  ${fold('sys_push', 'Mitteilungen', 'aufs iPhone', '<div class="card" id="pushbox"><div class="empty">lädt …</div></div>')}
+  ${fold('sys_push', 'Mitteilungen', 'aufs iPhone', `<div class="card" id="pushbox">${SKEL}</div>`)}
   ${fold('sys_goal', 'Ziel', `${nf(g.usdt, 0)} USDT bis ${new Date(g.end).toLocaleDateString('de-DE')}`, `<div class="card">
     <form class="goalform" id="goalform" style="margin:0">
       <label>Ziel (USDT)<input type="number" id="g_usdt" inputmode="decimal" min="1" step="any" value="${g.usdt}" required></label>
@@ -641,7 +709,7 @@ function viewSystem() {
       <input type="checkbox" class="sw" id="explain"${pref.explain ? ' checked' : ''}></label>
     <div class="tg"><span class="tgl"><span>Auf- und zugeklappte Abschnitte</span><small>${Object.keys(pref.fold).length} gemerkt</small></span>
       <button class="btn ghost sm" id="foldreset" type="button">Zurücksetzen</button></div></div>`, true)}
-  ${fold('sys_siri', 'Siri', '„Wie stehen meine Bots?“', '<div class="card" id="siribox"><div class="empty">lädt …</div></div>', true)}
+  ${fold('sys_siri', 'Siri', '„Wie stehen meine Bots?“', `<div class="card" id="siribox">${SKEL}</div>`, true)}
   <div class="lbl" style="text-align:center">Bitget wird alle ${state.poll_seconds} s abgefragt – nur lesend.</div>`;
 }
 
@@ -682,14 +750,14 @@ async function siriPanel(box) {
 
 // ------------------------------------------------------------------ Zonen (Treppe/Aufzug, nur Anzeige)
 function viewZones() {
-  return `${header('Zonen', 'Treppe & Aufzug · Bitget 1h')}
+  return `${header('Zonen', 'Treppe & Aufzug · Bitget 1h', true)}
   ${fold('z_info', 'So liest du die Zonen', 'Treppe · Aufzug · FVG-Leiter', `<div class="card"><span class="lbl">Jeder Coin ist gerade in einem Bein: langsam (<b>Treppe</b>), mindestens 3× schneller als das Bein davor
   (<b>Aufzug</b>) oder in der Gegenbewegung nach einem Aufzug (<b>Rückprall</b>). Gemessen in Tagesschwankungen σ.
   Das Band zeigt, wie weit solche Beine 2022–2026 typisch liefen (mittlere Hälfte, Strich = Median).
   <b>FVG-Leiter</b>: die nächsten offenen Fair Value Gaps (1D/4h) in Laufrichtung. Ein Aufzug endet in 41 % der Fälle in einer
   solchen Zone (Zufall 32 %); bricht er durch, fängt ihn die nächste überzufällig oft. Nur Orientierung: als Handelssignal war
   das 2025–26 nach Kosten nicht profitabel.</span></div>`, true)}
-  <div id="zonen"><div class="empty">lädt …</div></div>`;
+  <div id="zonen">${SKEL}</div>`;
 }
 
 // Auswahl bleibt beim Neuzeichnen erhalten (Filter, gewählter Coin, Kerzen-Cache)
@@ -795,14 +863,17 @@ async function render() {
   if (!state) return;
   const r = route();
   tabs.hidden = false;
-  for (const a of tabs.querySelectorAll('a')) a.classList.toggle('on', a.dataset.tab === (r.name === 'bot' || r.name === 'trade' ? 'home' : r.name));
+  const tab = { bot: 'home', trade: 'home', zonen: 'auswertung' }[r.name] || r.name;
+  for (const a of tabs.querySelectorAll('a')) a.classList.toggle('on', a.dataset.tab === tab);
   const badge = document.getElementById('badge');
-  const crit = liveAlerts().filter((a) => a.level !== 'info').length;
+  const crit = groupAlerts(liveAlerts().filter((a) => a.level !== 'info')).length;
   badge.hidden = !crit; badge.textContent = crit;
 
   const html = r.name === 'bot' ? viewBot(r.arg) : r.name === 'trade' ? viewTrade(r.arg) : r.name === 'alarme' ? viewAlerts()
-    : r.name === 'auswertung' ? viewStats() : r.name === 'system' ? viewSystem() : r.name === 'zonen' ? viewZones() : viewHome();
+    : r.name === 'auswertung' ? viewStats() : r.name === 'system' ? viewSystem() : r.name === 'zonen' ? viewZones()
+      : r.name === 'positionen' ? viewPositions() : viewHome();
   app.innerHTML = html;
+  updateMinibar();
   document.getElementById('reload')?.addEventListener('click', refresh);
   // Zurueck: in der App einen Schritt zurueck (dorthin, wo man herkam); direkt geoeffnet -> Uebersicht
   document.getElementById('back')?.addEventListener('click', (ev) => { if (navCount > 0) { ev.preventDefault(); history.back(); } });
@@ -824,12 +895,14 @@ async function render() {
   const eq = (bot) => api(`/api/equity?bot=${encodeURIComponent(bot)}&range=${ui.range}&mode=${ui.mode}`);
   const ap = document.getElementById('allpos'); if (ap) drawPositions(ap, allPositions(), true);
   const bp = document.getElementById('botpos');
-  if (bp) { const bb = state.bots.find((x) => x.name === r.arg); drawPositions(bp, (bb.paper ? bb.paper.positions || [] : bb.positions).map((p) => ({ ...p, bot: bb.name })), false); }
+  if (bp) { const bb = state.bots.find((x) => x.name === r.arg); drawPositions(bp, (bb.paper ? bb.paper.positions || [] : bb.positions).map((p) => ({ ...p, bot: bb.name })), false, 5); }
   try {
     if (r.name === 'home') {
-      const ex = document.getElementById('expo'); if (ex) drawExposure(ex, state.bots);
-      const [pts, market] = await Promise.all([eq('all'), api('/api/market').catch(() => null)]);
+      const pts = await eq('all');
       const el = document.getElementById('homechart'); if (el) { el.innerHTML = chartWithSummary(pts); bindScrub(el, pts); }
+    } else if (r.name === 'positionen') {
+      const ex = document.getElementById('expo'); if (ex) drawExposure(ex, state.bots);
+      const market = await api('/api/market').catch(() => null);
       const w = document.getElementById('worst'); if (w) drawWorst(w, allPositions(), market, totals(state.bots).equity);
       const f = document.getElementById('funding'); if (f) drawFunding(f, allPositions(), market);
     } else if (r.name === 'bot') {
@@ -894,6 +967,11 @@ async function refresh() {
     window.scrollTo(0, y);
   } catch (e) {
     if (e.message !== 'login' && !state) app.innerHTML = `<div class="note">Server nicht erreichbar (${esc(e.message)}).</div>`;
+    else if (e.message !== 'login') {
+      // alter Stand bleibt sichtbar, aber deutlich als veraltet markiert
+      const f = document.getElementById('fresh'); if (f) f.outerHTML = freshHtml(true);
+      updateMinibar(true);
+    }
   } finally {
     loading = false;
     document.getElementById('reload')?.classList.remove('spin');
@@ -934,11 +1012,64 @@ app.addEventListener('click', (ev) => {
     if (q) q.hidden = !q.hidden;
     return;
   }
+  const sm = ev.target.closest('.showmore');
+  if (sm) {
+    const box = sm.previousElementSibling;
+    if (box && box.classList.contains('morebox')) box.hidden = false;
+    sm.remove();
+    return;
+  }
+  const sb = ev.target.closest('.seenbtn');
+  if (sb) { markSeen(sb); return; }
   const fo = ev.target.closest('[data-foldopen]');
   if (fo) { pref.fold[fo.dataset.foldopen] = false; savePref(); }
   const ag = ev.target.closest('[data-atabgo]');
   if (ag) { pref.atab = ag.dataset.atabgo; savePref(); }
 });
+
+// "Gesehen" / "Zurückholen": Server merkt es sich fuer alle Geraete
+async function markSeen(btn) {
+  btn.disabled = true;
+  const r = await fetch('/api/alerts/seen', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keys: JSON.parse(btn.dataset.seen), seen: !btn.dataset.back }) }).catch(() => null);
+  if (!r || !r.ok) { btn.disabled = false; btn.textContent = 'Fehler – nochmal'; return; }
+  await refresh();
+}
+
+// Mitlaufende Kopfzeile: Gesamtkapital, heute, offene Alarme -- erscheint beim Herunterscrollen
+const minibar = document.getElementById('minibar');
+function updateMinibar(failed) {
+  if (!minibar || !state) return;
+  const t = totals(state.bots), sum = (t.pnl || 0) + (t.upnl || 0);
+  const n = groupAlerts(liveAlerts().filter((a) => a.level !== 'info')).length;
+  const age = state.updated ? Date.now() / 1000 - state.updated : 0;
+  const lvl = failed || age > 900 ? 'down' : age > 300 ? 'warn' : '';
+  minibar.innerHTML = `<button type="button" aria-label="Nach oben"><b class="mono">${nf(t.equity)} USDT</b>
+    <span class="mono ${cls(sum)}">${signed(sum)} heute</span>
+    ${lvl ? `<span class="${lvl}">${failed ? 'offline' : 'alt'}</span>` : ''}
+    ${n ? `<span class="pill crit">${n} Alarm${n > 1 ? 'e' : ''}</span>` : ''}</button>`;
+  onScroll();
+}
+function onScroll() { if (minibar) minibar.classList.toggle('on', Boolean(state) && window.scrollY > 220); }
+window.addEventListener('scroll', onScroll, { passive: true });
+minibar?.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+
+// Auswertung: waagerecht wischen wechselt den Bereich (nicht auf Diagrammen, die selbst auf den Finger reagieren)
+let swipe = null;
+app.addEventListener('touchstart', (e) => {
+  swipe = route().name === 'auswertung' && !e.target.closest('svg, .scrub, .recap, .seg, .tabseg, input, .cal, .rank')
+    ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
+}, { passive: true });
+app.addEventListener('touchend', (e) => {
+  if (!swipe) return;
+  const dx = e.changedTouches[0].clientX - swipe.x, dy = e.changedTouches[0].clientY - swipe.y;
+  swipe = null;
+  if (Math.abs(dx) < 70 || Math.abs(dx) < 2 * Math.abs(dy)) return;
+  const i = GROUPS.findIndex(([k]) => k === curGroup()), j = i + (dx < 0 ? 1 : -1);
+  if (j < 0 || j >= GROUPS.length) return;
+  pref.atab = GROUPS[j][0]; savePref();
+  window.scrollTo(0, 0); render();
+}, { passive: true });
 
 window.addEventListener('hashchange', () => { navCount++; window.scrollTo(0, 0); render(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });

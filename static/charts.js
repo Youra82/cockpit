@@ -550,7 +550,8 @@ function reportInfo(r) {
 // ------------------------------------------------------------------ Offene Positionen als kompakte Liste (Übersicht: alle Bots, Bot-Seite: ein Bot)
 let posSort = 'gefahr';
 const posOpen = new Set();
-function drawPositions(box, rows, withBot) {
+let posAll = false;   // "alle zeigen" bei begrenzter Liste (Bot-Seite)
+function drawPositions(box, rows, withBot, limit) {
   if (!rows.length) { box.innerHTML = '<div class="empty">Keine offene Position</div>'; return; }
   // Ohne Stop-Loss (evobot-Papier): Verlustgrenze ist die Liquidation
   const stopOf = (p) => p.sl || (p.nosl ? p.liq : null);
@@ -576,7 +577,7 @@ function drawPositions(box, rows, withBot) {
   Object.entries(sorts).forEach(([k, [l]]) => {
     const bt = document.createElement('button');
     bt.type = 'button'; bt.textContent = l; bt.className = k === posSort ? 'on' : '';
-    bt.addEventListener('click', () => { posSort = k; drawPositions(box, rows, withBot); });
+    bt.addEventListener('click', () => { posSort = k; drawPositions(box, rows, withBot, limit); });
     seg.appendChild(bt);
   });
   const mini = (p) => {
@@ -601,7 +602,15 @@ function drawPositions(box, rows, withBot) {
       <circle cx="${x(p.mark)}" cy="11" r="4.5" fill="var(--text)" stroke="var(--card)" stroke-width="2"/></svg>`;
   };
   const list = box.querySelector('.plist');
-  [...rows].sort(sorts[posSort][1]).forEach((p) => {
+  const sorted = [...rows].sort(sorts[posSort][1]);
+  const cut = limit && !posAll && sorted.length > limit ? limit : sorted.length;
+  if (cut < sorted.length) {
+    const more = document.createElement('button');
+    more.type = 'button'; more.className = 'showmore'; more.textContent = `alle ${sorted.length} zeigen`;
+    more.addEventListener('click', (e) => { e.stopPropagation(); posAll = true; drawPositions(box, rows, withBot, limit); });
+    list.after(more);
+  }
+  sorted.slice(0, cut).forEach((p) => {
     const id = `${p.bot}|${p.symbol}|${p.side}${p.art ? '|' + p.art + '|' + p.opened : ''}`, d = toSl(p), open = posOpen.has(id);
     const dc = d == null || d < 2 ? 'r' : d < 5 ? 'y' : 'g';
     const { slFirst, liqCol } = liqInfo(p);
@@ -621,7 +630,7 @@ function drawPositions(box, rows, withBot) {
     const toggle = (ev) => {
       if (ev.target.closest('a, .pdet')) return;  // in den aufgeklappten Details nicht wieder zuklappen
       open ? posOpen.delete(id) : posOpen.add(id);
-      drawPositions(box, rows, withBot);
+      drawPositions(box, rows, withBot, limit);
     };
     row.addEventListener('click', toggle);
     row.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggle(ev); } });

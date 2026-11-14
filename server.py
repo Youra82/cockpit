@@ -37,6 +37,7 @@ CONFIG_PATH = os.path.join(BASE, 'config.json')
 DB_PATH = os.path.join(DATA, 'cockpit.db')
 GOAL_PATH = os.path.join(DATA, 'goal.json')
 BOTS_PATH = os.path.join(DATA, 'bots.json')
+SEEN_PATH = os.path.join(DATA, 'seen.json')
 PRODUCT = 'USDT-FUTURES'
 # Alarme, die bei ausgeblendeten Bots trotzdem gemeldet werden (falls in der App eingeschaltet)
 CRIT_HIDDEN = {'Position ohne Stop-Loss', 'Liquidation vor Stop-Loss', 'Nahe an der Liquidation', 'Liquidation'}
@@ -188,6 +189,29 @@ def load_visibility(cfg, names):
     v = {'hidden': {n for n in names if n not in shown}, 'known': set(names), 'crit_hidden': False}
     save_visibility(v)
     return v
+
+
+def alert_key(a):
+    """Stabiler Schluessel eines Alarms fuer "Gesehen": Bot, Art und erster Textteil (Coin/Seite).
+    "Bot läuft nicht" ohne Text, weil dort die Zeit seit dem letzten Lauf steht."""
+    if a['title'] == 'Bot läuft nicht':
+        return f"{a['bot']}|{a['title']}"
+    return f"{a['bot']}|{a['title']}|{a['text'].split(' · ')[0]}"
+
+
+def load_seen():
+    try:
+        with open(SEEN_PATH, encoding='utf-8') as f:
+            return {str(k): time.time() for k in json.load(f)}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def save_seen(seen):
+    tmp = SEEN_PATH + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(sorted(seen), f, indent=1)
+    os.replace(tmp, SEEN_PATH)
 
 
 def save_visibility(v):
@@ -681,6 +705,7 @@ class Poller(threading.Thread):
         super().__init__(daemon=True)
         self.cfg, self.all_bots, self.store = cfg, bots, store
         self.vis = load_visibility(cfg, [b['name'] for b in bots])
+        self.seen = load_seen()     # Alarm-Schluessel -> zuletzt noch vorhanden (Zeit)
         self.scan_ts = time.time()
         self.wake = threading.Event()
         self.build_lock = threading.Lock()
@@ -716,6 +741,17 @@ class Poller(threading.Thread):
         log.info('Anzeige geändert: ausgeblendet %s', ', '.join(sorted(self.vis['hidden'] & names)) or '-')
         self.build_state(pushes=False)
         self.wake.set()     # neu eingeblendete Bots sofort abfragen
+
+    def set_seen(self, keys, seen):
+        """Alarme als gesehen markieren (oder zurueckholen). Gilt fuer alle Geraete, bis der Alarm eine Stunde
+        lang verschwunden war -- kommt er danach wieder, ist er wieder neu."""
+        for k in keys:
+            if seen:
+                self.seen[k] = time.time()
+            else:
+                self.seen.pop(k, None)
+        save_seen(self.seen)
+        self.build_state(pushes=False)
 
     def client_for(self, fp, acc):
         a = self.accounts.setdefault(fp, {'client': None, 'data': None, 'error': None, 'ts': None,
@@ -1026,6 +1062,18 @@ class Poller(threading.Thread):
                              'new': b['name'] not in self.vis['known'], 'paper': bool(b.get('paper')),
                              'has_key': bool(b['fp']), 'running': running, 'last_activity': act,
                              'equity': item['equity'] if item else None})
+
+        # "Gesehen": Markierung anhaengen; Schluessel vergessen, wenn der Alarm eine Stunde weg war
+        for a in alerts:
+            a['key'] = alert_key(a)
+            if a['key'] in self.seen:
+                a['seen'] = True
+                self.seen[a['key']] = now
+        gone = [k for k, ts in self.seen.items() if now - ts > 3600]
+        if gone:
+            for k in gone:
+                del self.seen[k]
+            save_seen(self.seen)
 
         order = {'crit': 0, 'warn': 1, 'info': 2}
         alerts.sort(key=lambda x: (order[x['level']], -(x['ts'] or 0)))
@@ -1338,7 +1386,7 @@ class App:
             opn += b['upnl'] or 0
         de = lambda v, d=2: f'{v:.{d}f}'.replace('.', ',')
         sgn = lambda v: ('plus ' if v >= 0 else 'minus ') + de(abs(v))
-        alerts = [a for a in st['alerts'] if not a.get('hidden')]
+        alerts = [a for a in st['alerts'] if not a.get('hidden') and not a.get('seen')]
         st = {**st, 'alerts': alerts}
         crit = [a for a in alerts if a['level'] == 'crit']
         txt = (f"Gesamtkapital {de(eq, 0)} USDT. Heute realisiert {sgn(real)}, offen {sgn(opn)}. "
@@ -1527,6 +1575,8 @@ def make_handler(app):
                 return self.post_goal()
             if path == '/api/bots':
                 return self.post_bots()
+            if path == '/api/alerts/seen':
+                return self.post_seen()
             if path.startswith('/api/push/'):
                 return self.post_push(path)
             if path != '/api/login':
@@ -1571,6 +1621,20 @@ def make_handler(app):
                 if not isinstance(hidden, list) or len(hidden) > 500:
                     raise ValueError
                 app.poller.set_visibility([str(h) for h in hidden], bool(body.get('crit_hidden', False)))
+            except (ValueError, KeyError, TypeError, AttributeError):
+                return self.send_json({'error': 'ungültig'}, 400)
+            self.send_json({'ok': True})
+
+        def post_seen(self):
+            """Alarme als gesehen markieren / zurueckholen (nur Anzeige im Cockpit)."""
+            if not self.authed():
+                return self.send_json({'error': 'login'}, 401)
+            try:
+                body = self.read_json()
+                keys = body['keys']
+                if not isinstance(keys, list) or len(keys) > 200:
+                    raise ValueError
+                app.poller.set_seen([str(k)[:300] for k in keys], bool(body.get('seen', True)))
             except (ValueError, KeyError, TypeError, AttributeError):
                 return self.send_json({'error': 'ungültig'}, 400)
             self.send_json({'ok': True})
