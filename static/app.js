@@ -220,12 +220,15 @@ function alertBar() {
 function botRow(b) {
   const status = b.paper ? `Papierkonto · ${b.running ? 'läuft' : 'steht'} · ${ago(b.last_activity)}`
     : !b.has_key ? 'kein API-Schlüssel gefunden' : b.running ? `läuft · ${ago(b.last_activity)}` : `steht · letzter Lauf ${ago(b.last_activity)}`;
-  const right = b.paper ? `<b class="${cls(b.pnl_today)}">${signed(b.pnl_today)}</b><span>${nf(b.equity)} USDT · ${(b.paper.open || []).length} Pos.</span>`
-    : `<b class="${cls(b.pnl_today)}">${b.has_key ? signed(b.pnl_today) : '—'}</b><span>${b.has_key ? `${nf(b.equity)} USDT · ${b.positions.length} Pos.` : ''}</span>`;
+  // Rechts: realisiert heute + offen jetzt = zusammen (wie die grosse Karte oben), links Kontostand und Positionen
+  const has = b.paper || b.has_key, real = b.pnl_today || 0, open = b.upnl || 0;
+  const val = (l, v) => `<span>${l}</span><b class="${cls(v)}">${has ? signed(v) : '—'}</b>`;
+  const npos = b.paper ? (b.paper.open || []).length : b.positions.length;
   return `<a class="bot${b.paper ? ' paper' : ''}" href="#/bot/${encodeURIComponent(b.name)}">
     <span class="dot ${b.running ? 'on' : 'off'}" aria-hidden="true"></span>
-    <div class="t"><b>${esc(b.name)}${botAlarm(b.name)}</b><span>${status}</span></div>
-    <div class="r">${right}</div>${icon.chev}</a>`;
+    <div class="t"><b>${esc(b.name)}${botAlarm(b.name)}</b><span>${status}</span>
+      ${has ? `<span>${nf(b.equity)} USDT · ${npos} Pos.</span>` : ''}</div>
+    <div class="r pnl3">${val('realisiert', real)}${val('offen', open)}${val('zusammen', real + open)}</div>${icon.chev}</a>`;
 }
 
 function viewHome() {
@@ -246,7 +249,7 @@ function viewHome() {
     <div class="tile"><span class="lbl">Positionen</span><b>${t.positions}</b></div>
     <div class="tile"><span class="lbl">Trades heute</span><b>${t.trades}</b></div>
   </div>
-  <div class="h2row"><div><b>Meine Bots</b><span class="lbl">Zahl = realisiert heute</span></div>${sortSeg()}</div>
+  <div class="h2row"><div><b>Meine Bots</b><span class="lbl">heute realisiert + offen</span></div>${sortSeg()}</div>
   ${bots.map(botRow).join('')}
   ${nh ? `<a class="hint" href="#/system"><span class="grow">${nh} weitere${nh > 1 ? '' : 'r'} Bot${nh > 1 ? 's' : ''} erkannt, ausgeblendet</span><b>System ›</b></a>` : ''}
   ${paper.length ? `<h2>Papierkonten <small>zählen nicht zum Gesamtkapital</small></h2>${paper.map(botRow).join('')}` : ''}

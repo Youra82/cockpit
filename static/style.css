@@ -343,3 +343,9 @@ h2 .h2r { display: flex; align-items: center; gap: 8px; }
 .tgl { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .tgl small { font-size: 11.5px; color: var(--muted); line-height: 1.4; }
 .tgn { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* Bot-Zeile: realisiert / offen / zusammen rechts */
+.bot .r.pnl3 { display: grid; grid-template-columns: auto auto; column-gap: 8px; row-gap: 1px; align-items: baseline; justify-items: end; flex: none; }
+.bot .r.pnl3 span { font-size: 11px; color: var(--muted); }
+.bot .r.pnl3 b { font-family: var(--mono); font-size: 13px; }
+.bot .r.pnl3 b:last-child { font-size: 14px; font-weight: 700; }
+.bot .t span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
