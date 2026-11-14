@@ -18,6 +18,16 @@ pref.fold = pref.fold && typeof pref.fold === 'object' ? pref.fold : {};
 function savePref() { try { localStorage.setItem('cockpit.ui', JSON.stringify(pref)); } catch (e) { /* gesperrt: gilt nur bis zum Neuladen */ } }
 const isFolded = (key, def) => (key in pref.fold ? pref.fold[key] : def);
 
+// "Seit deinem letzten Besuch": wann die App zuletzt verlassen wurde (je Geraet). Karte erscheint ab 10 min Abwesenheit.
+let sinceTs = pref.lastVisit || null, sinceHidden = false;
+function markLeave() { pref.lastVisit = Math.floor(Date.now() / 1000); savePref(); }
+const showSince = () => sinceTs && !sinceHidden && Date.now() / 1000 - sinceTs > 600;
+
+// Letzter Stand fuer "ohne Verbindung" (Tailscale aus, Server weg): wird nach jedem erfolgreichen Abruf gemerkt
+let offline = false;
+function cacheState(s) { try { localStorage.setItem('cockpit.state', JSON.stringify(s)); } catch (e) { /* voll/gesperrt */ } }
+function cachedState() { try { return JSON.parse(localStorage.getItem('cockpit.state') || 'null'); } catch (e) { return null; } }
+
 // Globales Startdatum fuer alle Grafiken (gemerkt je Geraet). Gesetzt -> ersetzt den Zeitraum-Umschalter.
 const fromQ = () => (pref.from ? `&from=${pref.from}` : '');
 const isToday = () => ui.range === '1T' && !pref.from;
@@ -254,7 +264,7 @@ function bindScrub(host, points, ex = {}) {
     tip.classList.add('on');
     // Bot-Seite: welches Team war an dieser Stelle aktiv (bleibt nach dem Loslassen stehen)
     const ti = ex.teams && ex.teams.length ? host.closest('.card')?.querySelector('.teaminfo') : null;
-    if (ti) showTeam(ti, ex.teams, p.t);
+    if (ti) showTeam(ti, ex.teams, p.t, ex.teamTrades);
   };
   const hide = () => { scrubbing = false; line.hidden = dot.hidden = true; tip.classList.remove('on'); };
   box.addEventListener('pointerdown', (ev) => { scrubbing = true; box.setPointerCapture?.(ev.pointerId); show(ev); });
@@ -267,28 +277,96 @@ function bindScrub(host, points, ex = {}) {
 const stratName = (k) => { const [s, tf] = String(k).split('_'); return `${s.replace(/USDTUSDT$|USDT$/, '')}${tf ? ' ' + tf : ''}`; };
 const teamIdx = (teams, ts) => { let k = -1; teams.forEach((tm, i) => { if (tm.t <= ts) k = i; }); return k; };
 const dShort = (ts) => new Date(ts * 1000).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: '2-digit' });
-// Kasten unter der Bot-Kurve: Team zum angetippten Zeitpunkt (ts) bzw. das aktuelle (ts = null)
-function showTeam(box, teams, ts) {
+// Ergebnis eines Teams: Trades des Bots im Team-Zeitraum (soweit gespeichert)
+function teamStats(teams, k, trades) {
+  const a = teams[k].t, b = k + 1 < teams.length ? teams[k + 1].t : Infinity;
+  const tr = (trades || []).filter((t) => t.utime / 1000 >= a && t.utime / 1000 < b);
+  const first = (trades || []).reduce((m, t) => Math.min(m, t.utime / 1000), Infinity);
+  const net = tr.reduce((s, t) => s + t.net, 0), win = tr.filter((t) => t.net > 0).length;
+  const days = Math.max(1, ((b === Infinity ? Date.now() / 1000 : b) - a) / 86400);
+  return { n: tr.length, net, win, days, partial: a < first - 3600 };
+}
+const teamStatsHtml = (s) => (s.n ? `<b class="${cls(s.net)}">${signed(s.net)} USDT</b> · ${s.n} Trades · ${Math.round(s.win / s.n * 100)} % im Plus · ${nf(s.days, 0)} T${s.partial ? ' <span class="muted">(Trades nur teilweise gespeichert)</span>' : ''}`
+  : `noch kein Trade geschlossen · ${nf(s.days, 0)} T`);
+
+// Kasten unter der Bot-Kurve: Team zum angetippten Zeitpunkt (ts) bzw. das aktuelle (ts = null), mit Ergebnis
+function showTeam(box, teams, ts, trades) {
   if (!teams || !teams.length) { box.innerHTML = '<span class="lbl">Keine Teamhistorie gefunden (artifacts/db/team_history.jsonl).</span>'; return; }
   const k = ts == null ? teams.length - 1 : teamIdx(teams, ts);
   if (k < 0) { box.innerHTML = `<span class="lbl">${dShort(ts)}: vor der ersten Team-Aufzeichnung (${dShort(teams[0].t)}).</span>`; return; }
   const tm = teams[k], until = k + 1 < teams.length ? `bis ${dShort(teams[k + 1].t)}` : 'aktiv bis heute';
   box.innerHTML = `<div class="tihead"><span class="tnum k${k % 2}">T${k + 1}</span><b>${ts == null ? 'Aktuelles Team' : `Team am ${dShort(ts)}`}</b>
     <span class="lbl">seit ${dShort(tm.t)} · ${until} · ${tm.keys.length} Strategien</span></div>
+    <div class="tres">${teamStatsHtml(teamStats(teams, k, trades))}</div>
     <div class="tkeys">${tm.keys.map((x) => `<span>${esc(stratName(x))}</span>`).join('')}</div>
     <span class="lbl">${esc(tm.source)}${ts == null ? ' · Kurve antippen zeigt das Team zu jedem Zeitpunkt' : ''}</span>`;
 }
-// Liste aller Teamwechsel: wann, warum, wie viele Strategien, was kam dazu / fiel weg
-function drawTeamList(box, teams) {
+
+// Liste aller Teamwechsel: wann, Ergebnis des Teams, was kam dazu / fiel weg, Anlass
+function drawTeamList(box, teams, trades) {
   if (!teams || !teams.length) { box.innerHTML = '<div class="empty">Keine Teamhistorie gefunden.</div>'; return; }
   const rows = teams.map((tm, k) => {
     const prev = k ? new Set(teams[k - 1].keys) : null, cur = new Set(tm.keys);
     const add = prev ? tm.keys.filter((x) => !prev.has(x)) : [], rem = prev ? teams[k - 1].keys.filter((x) => !cur.has(x)) : [];
     return `<div class="li tl"><span class="tnum k${k % 2}">T${k + 1}</span><span class="grow"><b>ab ${dShort(tm.t)}</b> · ${tm.keys.length} Strategien
+      <small>${teamStatsHtml(teamStats(teams, k, trades))}</small>
       <small>${prev ? `${add.length ? `<span class="up">+ ${add.map(stratName).map(esc).join(', ')}</span>` : ''}${add.length && rem.length ? ' · ' : ''}${rem.length ? `<span class="down">− ${rem.map(stratName).map(esc).join(', ')}</span>` : ''}${!add.length && !rem.length ? 'gleiche Strategien' : ''}`
         : esc(tm.keys.map(stratName).join(', '))}</small><small class="muted">${esc(tm.source)}</small></span></div>`;
   }).reverse();
   box.innerHTML = moreList(rows, 5);
+}
+
+// Kennzahlen je Bot im Zeitraum der Kurve: Trefferquote, Ø Gewinn/Verlust, Profitfaktor, Rueckgang, Haltedauer
+function drawKpis(box, trades, pts) {
+  const t0 = pts && pts.length ? pts[0].t * 1000 : 0;
+  const tr = (trades || []).filter((t) => t.utime >= t0);
+  if (!tr.length) { box.innerHTML = '<div class="empty">Keine geschlossenen Trades in diesem Zeitraum.</div>'; return; }
+  const w = tr.filter((t) => t.net > 0), l = tr.filter((t) => t.net <= 0);
+  const sw = w.reduce((s, t) => s + t.net, 0), sl = l.reduce((s, t) => s + t.net, 0);
+  const pf = sl < 0 ? sw / -sl : null;
+  let peak = -Infinity, dd = 0;
+  (pts || []).forEach((p) => { peak = Math.max(peak, p.v); if (peak > 0) dd = Math.min(dd, (p.v / peak - 1) * 100); });
+  const hold = tr.reduce((s, t) => s + (t.utime - t.ctime), 0) / tr.length / 60000;
+  const holdTxt = hold < 120 ? `${nf(hold, 0)} min` : hold < 2880 ? `${nf(hold / 60, 1)} h` : `${nf(hold / 1440, 1)} T`;
+  const days = Math.max(1, (Date.now() - Math.max(t0, Math.min(...tr.map((t) => t.utime)))) / 864e5);
+  const tile = (l, v, sub, c = '') => `<div class="kpi"><span class="lbl">${l}</span><b class="mono ${c}">${v}</b><small>${sub}</small></div>`;
+  box.innerHTML = `<div class="kpis">
+    ${tile('Trefferquote', `${Math.round(w.length / tr.length * 100)} %`, `${w.length} von ${tr.length} im Plus`, w.length / tr.length >= 0.5 ? 'up' : '')}
+    ${tile('Profitfaktor', pf == null ? '∞' : nf(pf, 2), 'Gewinne ÷ Verluste', pf == null || pf >= 1 ? 'up' : 'down')}
+    ${tile('Ø Gewinn', w.length ? signed(sw / w.length) : '–', 'je Gewinn-Trade', 'up')}
+    ${tile('Ø Verlust', l.length ? signed(sl / l.length) : '–', 'je Verlust-Trade', 'down')}
+    ${tile('Größter Rückgang', `${nf(dd, 1)} %`, 'vom Höchststand der Kurve', dd < -20 ? 'down' : dd < -10 ? 'warn' : '')}
+    ${tile('Ø Haltedauer', holdTxt, `${nf(tr.length / days * 7, 1)} Trades je Woche`)}
+  </div><span class="lbl">Zeitraum wie die Kurve oben (${pts && pts.length ? `ab ${dShort(pts[0].t)}` : '90 Tage'}).</span>`;
+}
+
+// Margin-Auslastung: wie viel vom Konto steckt in offenen Positionen (Summe der Margin / Kontostand)
+function marginInfo(b) {
+  const used = (b.positions || []).reduce((s, p) => s + (p.margin || (p.notional && p.leverage ? p.notional / p.leverage : 0)), 0), eq = b.equity || 0;
+  const pct = eq > 0 ? used / eq * 100 : 0;
+  return { used, pct, lvl: pct >= 95 ? 'down' : pct >= 80 ? 'warn' : 'up' };
+}
+function marginBar(b, withName) {
+  const m = marginInfo(b);
+  return `<div class="mrow">${withName ? `<b style="color:${botColor(b.name)}">${esc(b.name)}</b>` : '<span class="lbl">Margin-Auslastung</span>'}
+    <div class="bar"><i style="width:${Math.min(100, m.pct).toFixed(1)}%;background:var(--${m.lvl === 'up' ? 'accent' : m.lvl})"></i></div>
+    <b class="mono ${m.lvl === 'up' ? '' : m.lvl}">${nf(m.pct, 0)} %</b></div>`;
+}
+
+// "Seit deinem letzten Besuch": was ist passiert, waehrend die App zu war
+function drawSince(box, d) {
+  const n = d.by.reduce((s, x) => s + x.n, 0), net = d.by.reduce((s, x) => s + x.net, 0);
+  const lines = [];
+  if (n) lines.push(`<div><b>${n} Trade${n > 1 ? 's' : ''} geschlossen</b> <b class="mono ${cls(net)}">${signed(net)} USDT</b>
+    <small>${d.by.map((x) => `<span style="color:${botColor(x.bot)}">${esc(x.bot)}</span> <span class="${cls(x.net)}">${signed(x.net)}</span> (${x.n})`).join(' · ')}</small></div>`);
+  if (d.alarms.length) lines.push(`<div><b class="down">${d.alarms.length} neue${d.alarms.length > 1 ? '' : 'r'} Alarm${d.alarms.length > 1 ? 'e' : ''}</b>
+    <small>${d.alarms.slice(0, 4).map((a) => `${esc(a.title)}${a.bot ? ` (${esc(a.bot)})` : ''}`).join(' · ')}</small></div>`);
+  d.teams.forEach((t) => lines.push(`<div><b>${esc(t.bot)}: neues Team T${t.nr}</b> <small>${t.n} Strategien, seit ${dShort(t.t)}</small></div>`));
+  d.transfers.forEach((t) => lines.push(`<div><b>${t.amt > 0 ? 'Einzahlung' : 'Auszahlung'} ${signed(t.amt)} USDT</b> <small>${esc(t.bot)}</small></div>`));
+  box.innerHTML = `<div class="card since"><div class="row2"><b>Seit deinem letzten Besuch</b>
+    <button type="button" class="calx" data-sinceclose aria-label="Ausblenden">✕</button></div>
+    <span class="lbl">${ago(d.ts)} · ${timeStr(d.ts * 1000)}</span>
+    ${lines.length ? lines.join('') : '<div class="muted">Nichts Neues – keine Trades, Alarme oder Teamwechsel.</div>'}</div>`;
 }
 
 // Mini-Kurve je Bot (7 Tage) fuer die Bot-Zeilen der Uebersicht
@@ -447,7 +525,8 @@ function viewHome() {
   const t = totals(state.bots);
   const bots = sortedBots(state.bots.filter((b) => !b.paper)), paper = state.bots.filter((b) => b.paper);
   const nh = hiddenCount();
-  return `${header('Bot-Cockpit', `Bitget · ${freshHtml()}`)}
+  return `${header('Bot-Cockpit', `Bitget · ${freshHtml(offline)}`)}
+  ${showSince() ? `<div id="sincebox">${SKEL}</div>` : ''}
   ${alertBar()}
   <div class="card" id="capcard">
     <span class="lbl">Gesamtkapital (alle Konten, inkl. offener Positionen)</span>
@@ -473,6 +552,8 @@ function viewPositions() {
   const rows = allPositions();
   return `${header('Positionen', `${rows.length} offen in ${new Set(rows.map((p) => p.bot)).size} Bots · antippen`, linkBack())}
   <div class="card" id="allpos"></div>
+  ${fold('risk_margin', 'Margin-Auslastung', 'je Bot · Warnung ab 80 %', `<div class="card">${state.bots.filter((b) => b.has_key).map((b) => marginBar(b, true)).join('')}
+    <span class="lbl">Anteil des Kontos, der als Margin in offenen Positionen steckt. Orange ab 80 %, rot ab 95 % – dann kann der Bot kaum noch neue Positionen eröffnen.</span></div>`)}
   ${fold('risk_worst', 'Worst Case', 'alle Stops / BTC-Szenario', `<div class="card" id="worst">${SKEL}</div>`)}
   ${fold('risk_fund', 'Funding-Uhr', 'nächste Zahlung', `<div class="card" id="funding">${SKEL}</div>`)}
   ${fold('risk_expo', 'Wo mein Geld gerade steckt', 'Zeile antippen', '<div class="card" id="expo"></div>')}`;
@@ -551,9 +632,12 @@ function viewBot(name) {
     ${chartControls()}
     <div id="botchart">${SKEL}</div>
     <div class="teaminfo" id="teaminfo" aria-live="polite"></div>
-    <span class="lbl">Frei verfügbar: ${nf(b.available)} USDT</span>
+    ${marginBar(b)}
+    <span class="lbl">Frei verfügbar: ${nf(b.available)} USDT · in Positionen gebunden: ${nf(marginInfo(b).used)} USDT</span>
   </div>
-  ${fold('teams', 'Teams', 'welche Strategien wann aktiv waren', '<div class="card tight" id="teamlist"></div>', true)}
+  <h2>Kennzahlen <small>Zeitraum wie die Kurve</small></h2>
+  <div class="card" id="botkpi">${SKEL}</div>
+  ${fold('teams', 'Teams', 'Strategien und Ergebnis je Team', '<div class="card tight" id="teamlist"></div>', true)}
   <h2>Offene Positionen <small>${b.positions.length}</small></h2>
   <div class="card" id="botpos"></div>
   ${otherOrders.length ? fold('orders', 'Wartende Orders', `${otherOrders.length} · ${[...new Set(otherOrders.map((o) => coin(o.symbol).split('/')[0]))].slice(0, 3).map(esc).join(', ')}`,
@@ -697,13 +781,29 @@ async function pushPanel(box) {
   }
   let prefs = (await api(`/api/push/prefs?endpoint=${encodeURIComponent(sub.endpoint)}`)).prefs;
   if (!prefs) prefs = (await (await post('/api/push/subscribe', { sub: sub.toJSON() })).json()).prefs;
+  const hours = (sel) => Array.from({ length: 24 }, (_, h) => `<option value="${h}"${h === sel ? ' selected' : ''}>${String(h).padStart(2, '0')}:00</option>`).join('');
+  const mute = new Set(prefs.mute || []);
+  const crit = (info.critical || []).map((k) => info.categories[k]).filter(Boolean).join(', ');
   box.innerHTML = `<div class="toggles">${Object.entries(info.categories).map(([k, l]) => `<label class="tg"><span>${esc(l)}</span>
       <input type="checkbox" class="sw" data-cat="${k}" ${prefs[k] ? 'checked' : ''}></label>`).join('')}</div>
+    <h3 class="psub">Nachtruhe</h3>
+    <label class="tg"><span class="tgl"><span>Nachtruhe</span><small>In dieser Zeit nur kritische Mitteilungen: ${esc(crit)}.</small></span>
+      <input type="checkbox" class="sw" data-quiet ${prefs.quiet_on ? 'checked' : ''}></label>
+    <div class="tg qrow"><span>von</span><select data-qf aria-label="Nachtruhe von">${hours(prefs.quiet_from)}</select>
+      <span>bis</span><select data-qt aria-label="Nachtruhe bis">${hours(prefs.quiet_to)}</select></div>
+    ${(info.bots || []).length ? `<h3 class="psub">Je Bot</h3>${info.bots.map((b) => `<label class="tg"><span style="color:${botColor(b)};font-weight:600">${esc(b)}</span>
+      <input type="checkbox" class="sw" data-mute="${esc(b)}" ${mute.has(b) ? '' : 'checked'} aria-label="Mitteilungen von ${esc(b)}"></label>`).join('')}
+      <span class="lbl">Aus = keine Mitteilungen dieses Bots (Tagesabschluss und Monatsrückblick kommen weiter).</span>` : ''}
     <div class="row" style="gap:8px;margin-top:10px"><button class="btn" id="pushtest" type="button">Test senden</button>
       <button class="btn ghost" id="pushoff" type="button">Ausschalten</button></div><div class="lbl" id="pushmsg"></div>`;
-  box.querySelectorAll('[data-cat]').forEach((c) => c.addEventListener('change', async () => {
-    prefs[c.dataset.cat] = c.checked;
-    await post('/api/push/subscribe', { sub: sub.toJSON(), prefs });
+  const save = () => post('/api/push/subscribe', { sub: sub.toJSON(), prefs });
+  box.querySelectorAll('[data-cat]').forEach((c) => c.addEventListener('change', () => { prefs[c.dataset.cat] = c.checked; save(); }));
+  box.querySelector('[data-quiet]').addEventListener('change', (e) => { prefs.quiet_on = e.target.checked; save(); });
+  box.querySelector('[data-qf]').addEventListener('change', (e) => { prefs.quiet_from = Number(e.target.value); save(); });
+  box.querySelector('[data-qt]').addEventListener('change', (e) => { prefs.quiet_to = Number(e.target.value); save(); });
+  box.querySelectorAll('[data-mute]').forEach((c) => c.addEventListener('change', () => {
+    if (c.checked) mute.delete(c.dataset.mute); else mute.add(c.dataset.mute);
+    prefs.mute = [...mute]; save();
   }));
   document.getElementById('pushtest').addEventListener('click', async () => {
     const r = await (await post('/api/push/test', { endpoint: sub.endpoint })).json();
@@ -879,8 +979,24 @@ function viewSystem() {
       <input type="checkbox" class="sw" id="explain"${pref.explain ? ' checked' : ''}></label>
     <div class="tg"><span class="tgl"><span>Auf- und zugeklappte Abschnitte</span><small>${Object.keys(pref.fold).length} gemerkt</small></span>
       <button class="btn ghost sm" id="foldreset" type="button">Zurücksetzen</button></div></div>`, true)}
+  ${fold('sys_export', 'Trades exportieren', 'CSV für Excel / Steuer', exportCard(), true)}
   ${fold('sys_siri', 'Siri', '„Wie stehen meine Bots?“', `<div class="card" id="siribox">${SKEL}</div>`, true)}
   <div class="lbl" style="text-align:center">Bitget wird alle ${state.poll_seconds} s abgefragt – nur lesend.</div>`;
+}
+
+// CSV-Export aller geschlossenen Trades (alle Bots, auch ausgeblendete) fuer ein Jahr oder einen Monat
+function exportCard() {
+  const now = new Date(), y = now.getFullYear();
+  const months = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
+  return `<div class="card">
+    <div class="row" style="gap:8px">
+      <label class="fld grow">Jahr<select id="exy">${[y, y - 1, y - 2].map((v) => `<option value="${v}">${v}</option>`).join('')}</select></label>
+      <label class="fld grow">Monat<select id="exm"><option value="">ganzes Jahr</option>${months.map((m, i) => `<option value="${i + 1}"${i === now.getMonth() ? ' selected' : ''}>${m}</option>`).join('')}</select></label>
+    </div>
+    <a class="btn" id="exbtn" href="/api/export.csv?year=${y}&month=${now.getMonth() + 1}" download>CSV herunterladen</a>
+    <span class="lbl">Je Trade: Datum, Bot, Coin, Richtung, Menge, Ein- und Ausstieg, Kursgewinn, Gebühren, Funding, Netto – mit Summenzeile.
+      Semikolon und Dezimalkomma, öffnet direkt in Excel/Numbers. Enthält alle Bots, auch ausgeblendete. Gespeichert sind Trades etwa ab Mitte August 2026.</span>
+  </div>`;
 }
 
 // Anzeige ein-/ausblenden: gilt sofort fuer Uebersicht, Alarme und Auswertung (Server merkt es sich in data/bots.json)
@@ -1069,12 +1185,17 @@ async function render() {
     savePref(); render();
   });
   bindGoalForm();
+  // CSV-Export: Link passt sich an Jahr/Monat an
+  const exy = document.getElementById('exy'), exm = document.getElementById('exm'), exb = document.getElementById('exbtn');
+  if (exy && exm && exb) [exy, exm].forEach((s) => s.addEventListener('change', () => { exb.href = `/api/export.csv?year=${exy.value}&month=${exm.value}`; }));
   const eq = (bot) => api(`/api/equity?bot=${encodeURIComponent(bot)}&range=${ui.range}&mode=${ui.mode}${fromQ()}`);
   const ap = document.getElementById('allpos'); if (ap) drawPositions(ap, allPositions(), true);
   const bp = document.getElementById('botpos');
   if (bp) { const bb = state.bots.find((x) => x.name === r.arg); drawPositions(bp, (bb.paper ? bb.paper.positions || [] : bb.positions).map((p) => ({ ...p, bot: bb.name })), false, 5); }
   try {
     if (r.name === 'home') {
+      const sbx = document.getElementById('sincebox');
+      if (sbx) cachedApi(`/api/since?ts=${sinceTs}`, 60000).then((d) => { if (sbx.isConnected) drawSince(sbx, d); }).catch(() => sbx.remove());
       // Kurve + Markierungen (Trades, Ein-/Auszahlungen, heute inkl. offen) und Mini-Kurven je Bot
       const [pts, trades, transfers, open, race] = await Promise.all([eq('all'), cachedApi('/api/trades?x=1' + fromQ()).catch(() => []),
         cachedApi(`/api/transfers?bot=all&range=${ui.range}${fromQ()}`, 300000).catch(() => []),
@@ -1097,10 +1218,12 @@ async function render() {
         b.paper ? [] : cachedApi(`/api/transfers?bot=${enc}&range=${ui.range}${fromQ()}`, 300000).catch(() => []),
         !b.paper && isToday() ? api(`/api/open?bot=${enc}`).catch(() => []) : [],
         b.paper ? [] : cachedApi(`/api/teams?bot=${enc}`, 300000).catch(() => [])]);
-      const ex = { trades: trades.filter((x) => x.bot === r.arg), transfers, open, teams };
+      // teamTrades: alle gespeicherten Trades des Bots (fuer das Ergebnis je Team, unabhaengig vom Startdatum)
+      const ex = { trades: trades.filter((x) => x.bot === r.arg), transfers, open, teams, teamTrades: tradesAll.filter((x) => x.bot === r.arg) };
       const c = document.getElementById('botchart'); if (c) { c.innerHTML = chartWithSummary(pts, ex); bindScrub(c, pts, ex); }
-      const ti = document.getElementById('teaminfo'); if (ti) showTeam(ti, teams, null);
-      const tl = document.getElementById('teamlist'); if (tl) drawTeamList(tl, teams);
+      const ti = document.getElementById('teaminfo'); if (ti) showTeam(ti, teams, null, ex.teamTrades);
+      const tl = document.getElementById('teamlist'); if (tl) drawTeamList(tl, teams, ex.teamTrades);
+      const kp = document.getElementById('botkpi'); if (kp) drawKpis(kp, ex.trades, pts);
       const t = document.getElementById('bottrades'); if (t) t.innerHTML = tradeRows(st.trades, false);
       const k = document.getElementById('botcoins'); if (k) drawCoins(k, trades, r.arg);
       const fe = document.getElementById('botfees'); if (fe) drawFees(fe, trades.filter((x) => x.bot === r.arg));
@@ -1153,12 +1276,20 @@ async function refresh() {
   document.getElementById('reload')?.classList.add('spin');
   try {
     state = await api('/api/state');
+    offline = false;
+    cacheState(state);
     const y = window.scrollY;
     await render();
     window.scrollTo(0, y);
   } catch (e) {
-    if (e.message !== 'login' && !state) app.innerHTML = `<div class="note">Server nicht erreichbar (${esc(e.message)}).</div>`;
+    const cached = e.message !== 'login' && !state ? cachedState() : null;
+    if (cached) {
+      // ohne Verbindung: letzten gemerkten Stand zeigen, deutlich als offline markiert
+      state = cached; offline = true;
+      await render();
+    } else if (e.message !== 'login' && !state) app.innerHTML = `<div class="note">Server nicht erreichbar (${esc(e.message)}). Ist Tailscale auf dem iPhone an?</div>`;
     else if (e.message !== 'login') {
+      offline = true;
       // alter Stand bleibt sichtbar, aber deutlich als veraltet markiert
       const f = document.getElementById('fresh'); if (f) f.outerHTML = freshHtml(true);
       updateMinibar(true);
@@ -1212,6 +1343,7 @@ app.addEventListener('click', (ev) => {
   }
   const sb = ev.target.closest('.seenbtn');
   if (sb) { markSeen(sb); return; }
+  if (ev.target.closest('[data-sinceclose]')) { sinceHidden = true; document.getElementById('sincebox')?.remove(); return; }
   const fo = ev.target.closest('[data-foldopen]');
   if (fo) { pref.fold[fo.dataset.foldopen] = false; savePref(); }
   const ag = ev.target.closest('[data-atabgo]');
@@ -1231,6 +1363,7 @@ async function markSeen(btn) {
 const minibar = document.getElementById('minibar');
 function updateMinibar(failed) {
   if (!minibar || !state) return;
+  failed = failed || offline;
   const t = totals(state.bots), sum = (t.pnl || 0) + (t.upnl || 0);
   const n = groupAlerts(liveAlerts().filter((a) => a.level !== 'info')).length;
   const age = state.updated ? Date.now() / 1000 - state.updated : 0;
@@ -1264,7 +1397,13 @@ app.addEventListener('touchend', (e) => {
 
 tabs.addEventListener('click', (e) => { const a = e.target.closest('a'); if (a && a.getAttribute('href') !== (location.hash || '#/')) viaTab = true; });
 window.addEventListener('hashchange', () => { navCount++; linkNav = !viaTab; viaTab = false; window.scrollTo(0, 0); render(); });
-document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { markLeave(); return; }
+  // zurueck in der App: nach mehr als 10 min wieder "Seit deinem letzten Besuch" zeigen
+  if (pref.lastVisit && Date.now() / 1000 - pref.lastVisit > 600) { sinceTs = pref.lastVisit; sinceHidden = false; }
+  refresh();
+});
+window.addEventListener('pagehide', markLeave);
 // Eingabe im Ziel-Formular, Finger auf der Kurve oder eben angetippte Auswahl nicht durch den Auto-Refresh wegwischen
 let lastTouch = 0;
 document.addEventListener('pointerdown', () => { lastTouch = Date.now(); });

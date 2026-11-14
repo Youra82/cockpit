@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import threading
+from datetime import datetime, timedelta, timezone
 
 log = logging.getLogger('cockpit')
 
@@ -34,13 +35,42 @@ CATEGORIES = {
     'monthly': 'Monatsrückblick',
 }
 DEFAULT_ON = {k: k != 'error' for k in CATEGORIES}
+# In der Nachtruhe kommen nur diese (kritischen) Arten durch
+CRITICAL = {'bot_down', 'no_sl', 'liq'}
+# Weitere Einstellungen je Geraet: Nachtruhe (Stunden von/bis, Ortszeit) und stummgeschaltete Bots
+EXTRA_DEFAULT = {'quiet_on': False, 'quiet_from': 23, 'quiet_to': 7, 'mute': []}
+
+
+def _clean_extra(prefs):
+    """Nur gueltige Zusatz-Einstellungen uebernehmen."""
+    out = {}
+    if 'quiet_on' in prefs:
+        out['quiet_on'] = bool(prefs['quiet_on'])
+    for k in ('quiet_from', 'quiet_to'):
+        if k in prefs:
+            try:
+                out[k] = max(0, min(23, int(prefs[k])))
+            except (TypeError, ValueError):
+                pass
+    if isinstance(prefs.get('mute'), list):
+        out['mute'] = sorted({str(b)[:40] for b in prefs['mute']})[:50]
+    return out
+
+
+def in_quiet(prefs, hour):
+    """Liegt die Stunde in der Nachtruhe? Fenster darf ueber Mitternacht gehen (23 -> 7)."""
+    if not prefs.get('quiet_on'):
+        return False
+    a, b = prefs.get('quiet_from', 23), prefs.get('quiet_to', 7)
+    return (a <= hour < b) if a < b else (hour >= a or hour < b) if a != b else False
 
 
 class Pusher:
-    def __init__(self, data_dir, contact):
+    def __init__(self, data_dir, contact, tz_hours=1):
         self.key_path = os.path.join(data_dir, 'vapid.pem')
         self.subs_path = os.path.join(data_dir, 'push.json')
         self.contact = contact
+        self.tz = timezone(timedelta(hours=tz_hours))
         self.lock = threading.Lock()
         self.public_key = None
         if not AVAILABLE:
@@ -77,8 +107,9 @@ class Pusher:
         with self.lock:
             d = self._load()
             old = next((s for s in d['subs'] if s['sub']['endpoint'] == sub['endpoint']), None)
-            p = {**DEFAULT_ON, **(old['prefs'] if old else {}),
-                 **{k: bool(v) for k, v in (prefs or {}).items() if k in CATEGORIES}}
+            p = {**DEFAULT_ON, **EXTRA_DEFAULT, **(old['prefs'] if old else {}),
+                 **{k: bool(v) for k, v in (prefs or {}).items() if k in CATEGORIES},
+                 **_clean_extra(prefs or {})}
             d['subs'] = [s for s in d['subs'] if s['sub']['endpoint'] != sub['endpoint']]
             d['subs'].append({'sub': {'endpoint': sub['endpoint'], 'keys': sub['keys']}, 'prefs': p})
             self._save(d)
@@ -87,7 +118,7 @@ class Pusher:
     def prefs(self, endpoint):
         with self.lock:
             s = next((s for s in self._load()['subs'] if s['sub']['endpoint'] == endpoint), None)
-        return s['prefs'] if s else None
+        return {**EXTRA_DEFAULT, **s['prefs']} if s else None
 
     def unsubscribe(self, endpoint):
         with self.lock:
@@ -105,13 +136,25 @@ class Pusher:
             self._save(d)
 
     # ---------------------------------------------------------------- Senden
-    def send(self, category, title, body, url='/', only_endpoint=None):
+    def send(self, category, title, body, url='/', only_endpoint=None, bot=None):
+        """bot: Mitteilung gehoert zu diesem Bot (stummgeschaltete Bots werden je Geraet uebersprungen).
+        In der Nachtruhe eines Geraets kommen nur kritische Arten (CRITICAL) durch."""
         if not AVAILABLE:
             return 0
         with self.lock:
             subs = self._load()['subs']
+        hour = datetime.now(self.tz).hour
+
+        def wanted(s):
+            p = s['prefs']
+            if not p.get(category, DEFAULT_ON.get(category)):
+                return False
+            if bot and bot in (p.get('mute') or []):
+                return False
+            return category in CRITICAL or not in_quiet(p, hour)
+
         targets = [s for s in subs if (only_endpoint and s['sub']['endpoint'] == only_endpoint)
-                   or (not only_endpoint and s['prefs'].get(category, DEFAULT_ON.get(category)))]
+                   or (not only_endpoint and wanted(s))]
         payload = json.dumps({'title': title, 'body': body, 'url': url, 'tag': category})
         sent, gone = 0, []
         for s in targets:

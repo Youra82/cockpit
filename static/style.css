@@ -494,3 +494,23 @@ svg.viz text { font-size: 10.5px; fill: var(--muted); }
 .calx { border: 0; background: transparent; color: var(--muted); font-size: 13px; width: 30px; min-height: 32px; border-radius: 8px; cursor: pointer; }
 .calx:active { background: #2A3140; }
 .rangebar { display: flex; align-items: center; justify-content: space-between; gap: 10px; }.rangebar .seg { background: var(--card); border: 1px solid var(--line); }
+
+/* --- Runde 5: Seit dem letzten Besuch, Kennzahlen, Margin, Nachtruhe, Export --- */
+.since { border-left: 4px solid var(--accent); gap: 8px; }
+.since > div:not(.row2) { font-size: 13.5px; }
+.since small { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.45; }
+.since .row2 b { font-size: 15px; }
+.kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.kpi { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.kpi b { font-size: 18px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi small { font-size: 11px; color: var(--muted); }
+.mrow { display: grid; grid-template-columns: auto minmax(0, 1fr) 46px; gap: 10px; align-items: center; font-size: 13px; padding: 2px 0; }
+.mrow > b:first-child { min-width: 64px; }
+.mrow > b:last-child { text-align: right; font-size: 13px; }
+.mrow .bar { height: 8px; }
+.tres { font-size: 12.5px; }
+.psub { margin: 14px 0 2px; font-size: 13px; color: var(--muted); font-weight: 600; }
+.qrow { justify-content: flex-start; gap: 10px; }
+.qrow select, .fld select { font: inherit; font-size: 15px; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; color-scheme: dark; }
+.fld { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+#exbtn { display: flex; align-items: center; justify-content: center; text-decoration: none; }

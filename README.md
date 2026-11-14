@@ -86,6 +86,10 @@ Das Cockpit kann sich von selbst melden, auch wenn die App zu ist (iOS 16.4 oder
 2. Seite **System** → **Mitteilungen** → **Mitteilungen einschalten** → erlauben.
 3. **Test senden** antippen. Die Mitteilung kommt nach wenigen Sekunden.
 
+**Nachtruhe** (z. B. 23–7 Uhr): in dieser Zeit kommen nur kritische Mitteilungen (Bot läuft nicht, kein Stop-Loss, Liquidation). Außerdem lässt sich jeder Bot einzeln stummschalten. Beides gilt je Gerät.
+
+**Trades exportieren:** System → Trades exportieren → Jahr/Monat → CSV (Semikolon, Dezimalkomma, öffnet in Excel/Numbers). Enthält alle Bots, auch ausgeblendete.
+
 Arten, einzeln abschaltbar: Bot läuft nicht, Position ohne Stop-Loss, Liquidation/Liquidationsgefahr, Klumpenrisiko, Bitget-Fehler (aus), große Trades (ab `push_big_trade_usdt`), Tagesabschluss (ab `push_daily_hour` Uhr), Monatsrückblick am 1.
 Ein Alarm wird erst gemeldet, wenn er zwei Abfragen hintereinander besteht, damit die kurze Lücke zwischen Einstieg und SL-Order keine Mitteilung auslöst. Jeder Alarm kommt nur einmal, auch nach einem Neustart.
 Gesendet wird über Apples Push-Dienst. Die Schlüssel dafür (`data/vapid.pem`) erzeugt der Server beim ersten Start selbst.

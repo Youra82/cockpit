@@ -8,6 +8,7 @@ Server, nie Bitget direkt -- egal wie oft die App offen ist, die Last bei
 Bitget bleibt gleich. Es werden keine Orders gesendet oder storniert und
 keine Bot-Dateien geschrieben.
 """
+import gzip
 import hashlib
 import hmac
 import json
@@ -840,7 +841,7 @@ class Poller(threading.Thread):
                 dur = (f'{mins:.0f} min' if mins < 120 else f'{mins / 60:.1f} h' if mins < 2880
                        else f'{mins / 1440:.1f} Tagen').replace('.', ',')
                 self.pusher.send('big_trade', f"{self.bot_name(fp)}: {c['symbol'].split('/')[0]} {c['side']} geschlossen",
-                                 f"{c['net']:+.2f} USDT nach {dur}".replace('.', ',', 1), '#/auswertung')
+                                 f"{c['net']:+.2f} USDT nach {dur}".replace('.', ',', 1), '#/auswertung', bot=self.bot_name(fp))
 
     def alert_pushes(self, alerts, pairs, now):
         """Neue Alarme melden -- erst wenn sie zwei Runden hintereinander bestehen (kurze Luecke zwischen
@@ -860,7 +861,7 @@ class Poller(threading.Thread):
             self.store.add_event(a['bot'], 'alarm', a['title'], a['text'])
             if self.pusher:
                 url = f"#/bot/{a['bot']}" if a['bot'] else '#/alarme'
-                self.pusher.send(cat(a), f"{a['bot'] + ': ' if a['bot'] else ''}{a['title']}", a['text'], url)
+                self.pusher.send(cat(a), f"{a['bot'] + ': ' if a['bot'] else ''}{a['title']}", a['text'], url, bot=a['bot'])
         reported = (self.reported_alerts & set(keys)) | confirmed
         if reported != self.reported_alerts and self.pusher:
             self.pusher.meta('reported', sorted(reported))
@@ -1214,6 +1215,66 @@ class App:
                 return out
         return []
 
+    def since(self, ts):
+        """"Seit deinem letzten Besuch": geschlossene Trades je Bot, neue Alarme, Teamwechsel, Ein-/Auszahlungen
+        seit ts (Sekunden, hoechstens 30 Tage zurueck)."""
+        ts = max(int(ts), int(time.time()) - 30 * 86400)
+        fps = self.fps_for('all')
+        name_of = {}
+        for b in self.bots:
+            name_of.setdefault(b['fp'], b['name'])
+        by = {}
+        for r in self.store.closes(fps, ts * 1000) if fps else []:
+            x = by.setdefault(name_of.get(r['fp']), {'n': 0, 'net': 0.0, 'win': 0})
+            x['n'] += 1
+            x['net'] += r['net']
+            x['win'] += r['net'] > 0
+        shown = {b['name'] for b in self.bots}
+        alarms = [{'bot': e['bot'], 'title': e['title'], 'ts': e['ts']} for e in self.store.events(ts)
+                  if e['kind'] == 'alarm' and (not e['bot'] or e['bot'] in shown)]
+        teams = []
+        for b in self.bots:
+            if b.get('paper'):
+                continue
+            hist = self.teams(b['name'])
+            teams += [{'bot': b['name'], 't': tm['t'], 'n': len(tm['keys']), 'nr': k + 1}
+                      for k, tm in enumerate(hist) if tm['t'] > ts]
+        money, seen = [], set()
+        for b in self.bots:
+            if b['fp'] and b['fp'] not in seen:
+                seen.add(b['fp'])
+                money += [{'bot': b['name'], 'amt': round(amt, 2)} for _, amt, _, _ in self.store.bills_since(b['fp'], ts * 1000, 'trans') if amt]
+        return {'ts': ts, 'by': [{'bot': k, 'n': v['n'], 'net': round(v['net'], 2), 'win': v['win']} for k, v in sorted(by.items(), key=lambda kv: -abs(kv[1]['net']))],
+                'alarms': alarms[:20], 'teams': teams, 'transfers': money}
+
+    def export_csv(self, year, month):
+        """Alle geschlossenen Trades eines Jahres oder Monats als CSV (Excel-tauglich: Semikolon, Dezimalkomma,
+        UTF-8 mit BOM). Enthaelt auch ausgeblendete Bots, damit fuer die Steuer nichts fehlt."""
+        tz = timezone(timedelta(hours=self.cfg['timezone_offset_hours']))
+        y = int(year)
+        m = int(month) if month else None
+        start = datetime(y, m or 1, 1, tzinfo=tz)
+        end = (datetime(y + (m == 12), (m % 12) + 1, 1, tzinfo=tz) if m else datetime(y + 1, 1, 1, tzinfo=tz))
+        name_of, fps = {}, []
+        for b in self.poller.all_bots:
+            if b['fp'] and b['fp'] not in name_of:
+                name_of[b['fp']] = b['name']
+                fps.append(b['fp'])
+        rows = [r for r in (self.store.closes(fps, int(start.timestamp() * 1000)) if fps else [])
+                if r['utime'] < end.timestamp() * 1000]
+        rows.sort(key=lambda r: r['utime'])
+        num = lambda v, d=4: '' if v is None else f'{v:.{d}f}'.replace('.', ',')
+        dt = lambda ms: datetime.fromtimestamp(ms / 1000, tz).strftime('%d.%m.%Y %H:%M') if ms else ''
+        lines = ['Geschlossen;Eröffnet;Bot;Coin;Richtung;Menge;Einstieg;Ausstieg;Kursgewinn USDT;Gebühren USDT;Funding USDT;Netto USDT;Positions-ID']
+        for r in rows:
+            lines.append(';'.join([dt(r['utime']), dt(r['ctime']), name_of.get(r['fp'], ''), coin_of(r['symbol']), r['side'] or '',
+                                   num(r['size'], 6), num(r['open_price'], 8), num(r['close_price'], 8), num(r['pnl']),
+                                   num(r['fees']), num(r['funding']), num(r['net']), str(r['pid'])]))
+        lines.append(';'.join(['Summe', '', '', '', '', '', '', '', num(sum(r['pnl'] or 0 for r in rows)),
+                               num(sum(r['fees'] or 0 for r in rows)), num(sum(r['funding'] or 0 for r in rows)),
+                               num(sum(r['net'] or 0 for r in rows)), f'{len(rows)} Trades']))
+        return '﻿' + '\r\n'.join(lines) + '\r\n', f"cockpit-trades-{y}{f'-{m:02d}' if m else ''}.csv"
+
     def open_curve(self, bot):
         """Offenes Ergebnis seit 0 Uhr (5-min-Raster). Nur Zeitpunkte, an denen alle Konten gemessen wurden."""
         fps = [f for f in self.fps_for(bot) if not str(f).startswith('paper:')]
@@ -1520,9 +1581,16 @@ def make_handler(app):
 
         def send_json(self, obj, code=200, headers=None):
             body = json.dumps(obj, separators=(',', ':')).encode()
+            # Komprimiert senden, wenn das Geraet es kann (Trades ~160 KB -> ~20 KB, schneller ueber Mobilfunk)
+            gz = len(body) > 1024 and 'gzip' in (self.headers.get('Accept-Encoding') or '')
+            if gz:
+                body = gzip.compress(body, 5)
             self.send_response(code)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Cache-Control', 'no-store')
+            self.send_header('Vary', 'Accept-Encoding')
+            if gz:
+                self.send_header('Content-Encoding', 'gzip')
             for k, v in (headers or {}).items():
                 self.send_header(k, v)
             self.send_header('Content-Length', str(len(body)))
@@ -1595,6 +1663,24 @@ def make_handler(app):
                 return self.send_json(app.transfers(q.get('bot'), rng('1M')))
             if url.path == '/api/teams':
                 return self.send_json(app.teams(q.get('bot', '')))
+            if url.path == '/api/since':
+                try:
+                    return self.send_json(app.since(float(q.get('ts', '0'))))
+                except ValueError:
+                    return self.send_json({'error': 'ungültig'}, 400)
+            if url.path == '/api/export.csv':
+                try:
+                    text, fname = app.export_csv(q.get('year', ''), q.get('month', ''))
+                except (ValueError, TypeError):
+                    return self.send_json({'error': 'ungültig'}, 400)
+                body = text.encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/csv; charset=utf-8')
+                self.send_header('Content-Disposition', f'attachment; filename="{fname}"')
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                return self.wfile.write(body)
             if url.path == '/api/stats':
                 return self.send_json(app.stats(q.get('bot')))
             if url.path == '/api/race':
@@ -1626,7 +1712,8 @@ def make_handler(app):
                 return self.wfile.write(body)
             if url.path == '/api/push/key':
                 return self.send_json({'key': app.poller.pusher.public_key if app.poller.pusher else None,
-                                       'categories': push.CATEGORIES})
+                                       'categories': push.CATEGORIES, 'critical': sorted(push.CRITICAL),
+                                       'bots': [b['name'] for b in app.bots]})
             if url.path == '/api/push/prefs':
                 prefs = app.poller.pusher.prefs(q.get('endpoint', '')) if app.poller.pusher else None
                 return self.send_json({'prefs': prefs})
@@ -1740,7 +1827,7 @@ def main():
     poller = Poller(cfg, bots, store)
     log.info('Bots: %s', ', '.join(f"{b['name']}{'' if b['fp'] or b.get('paper') else ' (ohne Schlüssel)'}"
                                    f"{' (ausgeblendet)' if poller.is_hidden(b['name']) else ''}" for b in bots))
-    poller.pusher = push.Pusher(DATA, cfg['push_contact'])
+    poller.pusher = push.Pusher(DATA, cfg['push_contact'], cfg['timezone_offset_hours'])
     poller.build_state()
     poller.start()
     app = App(cfg, store, poller)
