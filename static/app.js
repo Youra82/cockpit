@@ -14,6 +14,21 @@ pref.fold = pref.fold && typeof pref.fold === 'object' ? pref.fold : {};
 function savePref() { try { localStorage.setItem('cockpit.ui', JSON.stringify(pref)); } catch (e) { /* gesperrt: gilt nur bis zum Neuladen */ } }
 const isFolded = (key, def) => (key in pref.fold ? pref.fold[key] : def);
 
+// Globales Startdatum fuer alle Grafiken (gemerkt je Geraet). Gesetzt -> ersetzt den Zeitraum-Umschalter.
+const fromQ = () => (pref.from ? `&from=${pref.from}` : '');
+const isToday = () => ui.range === '1T' && !pref.from;
+function setFrom(v) {
+  pref.from = v && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+  savePref();
+  for (const k in apiCache) delete apiCache[k];   // Zwischenspeicher passt nicht mehr zum Zeitraum
+  render();
+}
+const todayIso = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+// Datumsfeld "ab ..." (oeffnet auf dem iPhone die Datumsauswahl) + Knopf zum Zuruecksetzen
+const fromChip = (label = 'ab') => `<span class="datechip${pref.from ? ' on' : ''}"><label>${label}
+  <input type="date" data-from value="${pref.from || ''}" max="${todayIso()}" aria-label="Startdatum für alle Grafiken"></label>
+  ${pref.from ? '<button type="button" data-fromclear aria-label="Startdatum zurücksetzen">✕</button>' : ''}</span>`;
+
 // ------------------------------------------------------------------ Helfer
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const nf = (v, d = 2) => v == null || isNaN(v) ? '—' : Number(v).toLocaleString('de-DE', { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -75,13 +90,15 @@ function pnlSplit(real, open, key = 'tot') {
 
 // Zeitraum- und Modus-Umschalter ueber jedem Diagramm
 function chartControls() {
+  // Zeitraum-Knoepfe sind aus, solange ein Startdatum gewaehlt ist
   const seg = (key, opts) => `<div class="seg sm" role="group">${opts.map(([v, l]) =>
-    `<button data-${key}="${v}" class="${ui[key] === v ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+    `<button data-${key}="${v}" class="${ui[key] === v && !(key === 'range' && pref.from) ? 'on' : ''}">${l}</button>`).join('')}</div>`;
   // Wertfeld fuer den Finger auf der Kurve: fester Platz oben rechts, damit der Finger es nicht verdeckt
   return `<div class="ctrls">
     ${seg('mode', [['gewinn', 'Gewinn'], ['konto', 'Konto']])}
     ${seg('range', [['1T', 'Heute'], ['1W', '1W'], ['1M', '1M'], ['Alles', '90T']])}
-    <div class="stip" aria-live="polite"></div></div>`;
+    <div class="stip" aria-live="polite"></div></div>
+    <div class="ctrls2">${fromChip()}${pref.from ? '<span class="lbl">gilt für alle Grafiken</span>' : '<span class="lbl">oder Startdatum wählen – gilt für alle Grafiken</span>'}</div>`;
 }
 
 // Kapitalkurve mit Markierungen. ex = { trades, transfers, open } (alles optional):
@@ -92,7 +109,7 @@ function chartWithSummary(points, ex = {}) {
   const sc = chartScale(points, false, comb);
   const first = points[0], last = points[points.length - 1];
   const diff = last.v - first.v, pct = first.v ? diff / first.v * 100 : null;
-  const lab = (t) => (ui.range === '1T' ? new Date(t * 1000).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
+  const lab = (t) => (isToday() ? new Date(t * 1000).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
     : new Date(t * 1000).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' }));
   const labels = sc.ticks.map((v) => nf(v, sc.dec));
   const axis = labels.map((l, k) => `<span style="top:${(sc.y(sc.ticks[k]) / sc.H * 100).toFixed(2)}%">${l}</span>`).join('');
@@ -103,7 +120,7 @@ function chartWithSummary(points, ex = {}) {
   return `<div class="chartwrap"><div class="yaxis" style="width:${Math.max(...labels.map((l) => l.length))}ch" aria-hidden="true">${axis}</div>
     <div class="scrub">${chartSvg(points, false, comb)}${mk.html}
       <i class="sline" hidden></i><i class="sdot" hidden></i></div></div>
-    <div class="xaxis"><span>${ui.range === '1T' ? '0 Uhr' : lab(first.t)}</span><span>${lab(points[Math.floor(points.length / 2)].t)}</span><span>heute</span></div>
+    <div class="xaxis"><span>${isToday() ? '0 Uhr' : lab(first.t)}</span><span>${lab(points[Math.floor(points.length / 2)].t)}</span><span>heute</span></div>
     <div class="cdiff"><b class="${cls(diff)}">${signed(diff)} USDT${pct != null ? ` · ${signed(pct, 1)} %` : ''}</b>${comb ? ` <span class="muted">· inkl. offen <b class="${cls(comb[comb.length - 1] - first.v)}">${signed(comb[comb.length - 1] - first.v)}</b></span>` : ''}</div>
     ${legend ? `<div class="clegend">${legend}</div>` : ''}
     <span class="lbl">Kurve = realisierter Kontostand${comb ? ' (durchgezogen), gestrichelt mit offenen Positionen' : ', ohne offene Positionen'}${ui.mode === 'gewinn' ? ', Ein- und Auszahlungen herausgerechnet' : ''}. Finger über die Kurve zeigt Wert und Trades.</span>`;
@@ -111,7 +128,7 @@ function chartWithSummary(points, ex = {}) {
 
 // Zeitraum Heute: je Kurvenpunkt realisiert + offenes Ergebnis zu diesem Zeitpunkt
 function combLine(points, open) {
-  if (ui.range !== '1T' || !open || open.length < 2) return null;
+  if (!isToday() || !open || open.length < 2) return null;
   let k = -1;
   const out = points.map((p) => { while (k + 1 < open.length && open[k + 1].t <= p.t) k++; return k < 0 ? null : p.v + open[k].u; });
   return out.filter((v) => v != null).length >= 2 ? out : null;
@@ -130,6 +147,14 @@ function chartMarks(points, ex, sc) {
   const n = points.length, t0 = points[0].t, t1 = points[n - 1].t + 300;
   const pos = (i, v) => `left:${(i / (n - 1) * 100).toFixed(2)}%;top:${(sc.y(v) / sc.H * 100).toFixed(2)}%`;
   let html = '';
+  // Team-Zeitraeume als abwechselnd getoente Baender (nur Bot-Seite); Nummer = laufende Team-Nummer
+  (ex.teams || []).forEach((tm, k, all) => {
+    const a = Math.max(tm.t, t0), b = k + 1 < all.length ? Math.min(all[k + 1].t, t1) : t1;
+    if (b <= t0 || a >= t1) return;
+    const xa = Math.max(0, pointIdx(points, a)) / (n - 1) * 100, xb = (b >= t1 ? n - 1 : Math.max(0, pointIdx(points, b))) / (n - 1) * 100;
+    if (xb - xa < 0.5) return;
+    html += `<i class="tband k${k % 2}" style="left:${xa.toFixed(2)}%;width:${(xb - xa).toFixed(2)}%">${xb - xa > 9 ? `<b>T${k + 1}</b>` : ''}</i>`;
+  });
   const tr = (ex.trades || []).filter((t) => t.utime / 1000 >= t0 && t.utime / 1000 <= t1)
     .sort((a, b) => Math.abs(b.net) - Math.abs(a.net)).slice(0, 40);
   const mx = Math.max(0.01, ...tr.map((t) => Math.abs(t.net)));
@@ -221,12 +246,43 @@ function bindScrub(host, points, ex = {}) {
       ${comb && comb[i] != null ? `<small>inkl. offen ${nf(comb[i])}</small>` : ''}<small>${timeStr(p.t * 1000)}</small>${tt}`;
     line.hidden = dot.hidden = false;
     tip.classList.add('on');
+    // Bot-Seite: welches Team war an dieser Stelle aktiv (bleibt nach dem Loslassen stehen)
+    const ti = ex.teams && ex.teams.length ? host.closest('.card')?.querySelector('.teaminfo') : null;
+    if (ti) showTeam(ti, ex.teams, p.t);
   };
   const hide = () => { scrubbing = false; line.hidden = dot.hidden = true; tip.classList.remove('on'); };
   box.addEventListener('pointerdown', (ev) => { scrubbing = true; box.setPointerCapture?.(ev.pointerId); show(ev); });
   box.addEventListener('pointermove', (ev) => { if (scrubbing || ev.pointerType === 'mouse') show(ev); });
   ['pointerup', 'pointercancel'].forEach((e) => box.addEventListener(e, hide));
   box.addEventListener('pointerleave', (ev) => { if (ev.pointerType === 'mouse') hide(); });
+}
+
+// Teams (Strategie-Gruppen) aus der Teamhistorie des Bots
+const stratName = (k) => { const [s, tf] = String(k).split('_'); return `${s.replace(/USDTUSDT$|USDT$/, '')}${tf ? ' ' + tf : ''}`; };
+const teamIdx = (teams, ts) => { let k = -1; teams.forEach((tm, i) => { if (tm.t <= ts) k = i; }); return k; };
+const dShort = (ts) => new Date(ts * 1000).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: '2-digit' });
+// Kasten unter der Bot-Kurve: Team zum angetippten Zeitpunkt (ts) bzw. das aktuelle (ts = null)
+function showTeam(box, teams, ts) {
+  if (!teams || !teams.length) { box.innerHTML = '<span class="lbl">Keine Teamhistorie gefunden (artifacts/db/team_history.jsonl).</span>'; return; }
+  const k = ts == null ? teams.length - 1 : teamIdx(teams, ts);
+  if (k < 0) { box.innerHTML = `<span class="lbl">${dShort(ts)}: vor der ersten Team-Aufzeichnung (${dShort(teams[0].t)}).</span>`; return; }
+  const tm = teams[k], until = k + 1 < teams.length ? `bis ${dShort(teams[k + 1].t)}` : 'aktiv bis heute';
+  box.innerHTML = `<div class="tihead"><span class="tnum k${k % 2}">T${k + 1}</span><b>${ts == null ? 'Aktuelles Team' : `Team am ${dShort(ts)}`}</b>
+    <span class="lbl">seit ${dShort(tm.t)} · ${until} · ${tm.keys.length} Strategien</span></div>
+    <div class="tkeys">${tm.keys.map((x) => `<span>${esc(stratName(x))}</span>`).join('')}</div>
+    <span class="lbl">${esc(tm.source)}${ts == null ? ' · Kurve antippen zeigt das Team zu jedem Zeitpunkt' : ''}</span>`;
+}
+// Liste aller Teamwechsel: wann, warum, wie viele Strategien, was kam dazu / fiel weg
+function drawTeamList(box, teams) {
+  if (!teams || !teams.length) { box.innerHTML = '<div class="empty">Keine Teamhistorie gefunden.</div>'; return; }
+  const rows = teams.map((tm, k) => {
+    const prev = k ? new Set(teams[k - 1].keys) : null, cur = new Set(tm.keys);
+    const add = prev ? tm.keys.filter((x) => !prev.has(x)) : [], rem = prev ? teams[k - 1].keys.filter((x) => !cur.has(x)) : [];
+    return `<div class="li tl"><span class="tnum k${k % 2}">T${k + 1}</span><span class="grow"><b>ab ${dShort(tm.t)}</b> · ${tm.keys.length} Strategien
+      <small>${prev ? `${add.length ? `<span class="up">+ ${add.map(stratName).map(esc).join(', ')}</span>` : ''}${add.length && rem.length ? ' · ' : ''}${rem.length ? `<span class="down">− ${rem.map(stratName).map(esc).join(', ')}</span>` : ''}${!add.length && !rem.length ? 'gleiche Strategien' : ''}`
+        : esc(tm.keys.map(stratName).join(', '))}</small><small class="muted">${esc(tm.source)}</small></span></div>`;
+  }).reverse();
+  box.innerHTML = moreList(rows, 5);
 }
 
 // Mini-Kurve je Bot (7 Tage) fuer die Bot-Zeilen der Uebersicht
@@ -488,8 +544,10 @@ function viewBot(name) {
     ${pnlSplit(b.pnl_today, b.upnl, `b:${esc(b.name)}`)}
     ${chartControls()}
     <div id="botchart">${SKEL}</div>
+    <div class="teaminfo" id="teaminfo" aria-live="polite"></div>
     <span class="lbl">Frei verfügbar: ${nf(b.available)} USDT</span>
   </div>
+  ${fold('teams', 'Teams', 'welche Strategien wann aktiv waren', '<div class="card tight" id="teamlist"></div>', true)}
   <h2>Offene Positionen <small>${b.positions.length}</small></h2>
   <div class="card" id="botpos"></div>
   ${otherOrders.length ? fold('orders', 'Wartende Orders', `${otherOrders.length} · ${[...new Set(otherOrders.map((o) => coin(o.symbol).split('/')[0]))].slice(0, 3).map(esc).join(', ')}`,
@@ -662,6 +720,7 @@ function viewStats() {
   <div class="tabseg" role="tablist" aria-label="Bereich">${GROUPS.map(([k, l]) => `<button type="button" role="tab" data-atab="${k}"
     aria-selected="${k === g}" class="${k === g ? 'on' : ''}">${l}</button>`).join('')}</div>
   ${nh ? `<a class="hint" href="#/system"><span class="grow">Ohne ${nh} ausgeblendete${nh > 1 ? '' : 'n'} Bot${nh > 1 ? 's' : ''}</span><b>ändern ›</b></a>` : ''}
+  <div class="ctrls2">${fromChip('Zeitraum ab')}<span class="lbl">${pref.from ? 'gilt für alle Grafiken' : 'leer = letzte 90 Tage'}</span></div>
   <div id="statsbody"><div class="card">${SKEL}</div></div>`;
 }
 
@@ -729,10 +788,12 @@ function groupBody(g, d) {
   ${viz('vizO', 'Bots gegen BTC halten', 'beide ab 100', 'Hätten die Bots mehr gebracht, als das Geld einfach in BTC zu stecken? Finger über die Kurve.')}`;
 }
 
-const NEEDS = { ergebnis: ['stats', 'trades', 'dd'], bots: ['trades', 'race', 'reports'], trades: ['stats', 'trades'], markt: ['trades', 'dd', 'market', 'zones'] };
+const NEEDS = { ergebnis: ['stats', 'trades', 'dd'], bots: ['trades', 'tradesAll', 'race', 'reports'], trades: ['stats', 'trades'], markt: ['trades', 'dd', 'market', 'zones'] };
+// Alles ab dem globalen Startdatum (fromQ); die Note im Zeugnis bleibt bei 30 Tagen (tradesAll)
 const FETCH = {
-  stats: () => api('/api/stats?bot=all'), trades: () => api('/api/trades'), race: () => api('/api/race?range=Alles'),
-  dd: () => api('/api/equity?bot=all&range=Alles&mode=gewinn'), reports: () => api('/api/reports'),
+  stats: () => api('/api/stats?bot=all'), trades: () => cachedApi('/api/trades?x=1' + fromQ()), tradesAll: () => cachedApi('/api/trades?x=1'),
+  race: () => api('/api/race?range=Alles' + fromQ()),
+  dd: () => api('/api/equity?bot=all&range=Alles&mode=gewinn' + fromQ()), reports: () => api('/api/reports'),
   market: () => api('/api/market').catch(() => null), zones: () => api('/api/zones').catch(() => null),
 };
 
@@ -746,7 +807,7 @@ async function loadStats(el) {
   if (g === 'ergebnis') {
     drawRecap(box('vizM'), d.trades, d.dd); drawYear(box('vizY'), d.stats.days); drawDrawdown(box('vizA'), d.dd); drawForecast(box('vizP'), d.dd, state.goal);
   } else if (g === 'bots') {
-    drawGrades(box('vizS'), state.bots, d.trades, d.race, d.reports); drawRace(box('vizB'), d.race);
+    drawGrades(box('vizS'), state.bots, d.tradesAll, d.race, d.reports); drawRace(box('vizB'), d.race);
     drawCoins(box('vizK'), d.trades); drawFees(box('vizU'), d.trades);
   } else if (g === 'trades') {
     drawCosts(box('vizC'), d.trades); drawScatter(box('vizD'), d.trades); drawHeatmap(box('vizE'), d.trades);
@@ -981,7 +1042,9 @@ async function render() {
   // Zurueck: in der App einen Schritt zurueck (dorthin, wo man herkam); direkt geoeffnet -> Uebersicht
   document.getElementById('back')?.addEventListener('click', (ev) => { if (navCount > 0) { ev.preventDefault(); history.back(); } });
 
-  app.querySelectorAll('[data-range]').forEach((b) => b.addEventListener('click', () => { ui.range = b.dataset.range; render(); }));
+  app.querySelectorAll('[data-range]').forEach((b) => b.addEventListener('click', () => { ui.range = b.dataset.range; setFrom(null); }));
+  app.querySelectorAll('[data-from]').forEach((inp) => inp.addEventListener('change', () => setFrom(inp.value || null)));
+  app.querySelectorAll('[data-fromclear]').forEach((b) => b.addEventListener('click', () => setFrom(null)));
   app.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => { ui.mode = b.dataset.mode; render(); }));
   app.querySelectorAll('[data-sort]').forEach((b) => b.addEventListener('click', () => { pref.sort = b.dataset.sort; savePref(); render(); }));
   app.querySelectorAll('[data-atab]').forEach((b) => b.addEventListener('click', () => { pref.atab = b.dataset.atab; savePref(); render(); }));
@@ -995,16 +1058,16 @@ async function render() {
     savePref(); render();
   });
   bindGoalForm();
-  const eq = (bot) => api(`/api/equity?bot=${encodeURIComponent(bot)}&range=${ui.range}&mode=${ui.mode}`);
+  const eq = (bot) => api(`/api/equity?bot=${encodeURIComponent(bot)}&range=${ui.range}&mode=${ui.mode}${fromQ()}`);
   const ap = document.getElementById('allpos'); if (ap) drawPositions(ap, allPositions(), true);
   const bp = document.getElementById('botpos');
   if (bp) { const bb = state.bots.find((x) => x.name === r.arg); drawPositions(bp, (bb.paper ? bb.paper.positions || [] : bb.positions).map((p) => ({ ...p, bot: bb.name })), false, 5); }
   try {
     if (r.name === 'home') {
       // Kurve + Markierungen (Trades, Ein-/Auszahlungen, heute inkl. offen) und Mini-Kurven je Bot
-      const [pts, trades, transfers, open, race] = await Promise.all([eq('all'), cachedApi('/api/trades').catch(() => []),
-        cachedApi(`/api/transfers?bot=all&range=${ui.range}`, 300000).catch(() => []),
-        ui.range === '1T' ? api('/api/open?bot=all').catch(() => []) : [], cachedApi('/api/race?range=1W', 300000).catch(() => null)]);
+      const [pts, trades, transfers, open, race] = await Promise.all([eq('all'), cachedApi('/api/trades?x=1' + fromQ()).catch(() => []),
+        cachedApi(`/api/transfers?bot=all&range=${ui.range}${fromQ()}`, 300000).catch(() => []),
+        isToday() ? api('/api/open?bot=all').catch(() => []) : [], cachedApi('/api/race?range=1W', 300000).catch(() => null)]);
       const ex = { trades, transfers, open };
       const el = document.getElementById('homechart'); if (el) { el.innerHTML = chartWithSummary(pts, ex); bindScrub(el, pts, ex); }
       (race?.bots || []).forEach((s) => { const sp = app.querySelector(`[data-spark="${CSS.escape(s.name)}"]`); if (sp) sp.innerHTML = sparkSvg(s.v); });
@@ -1016,16 +1079,22 @@ async function render() {
     } else if (r.name === 'bot') {
       const b = state.bots.find((x) => x.name === r.arg);
       if (!b) return;
-      const [pts, st, trades, race, reports, transfers, open] = await Promise.all([eq(r.arg), api(`/api/stats?bot=${encodeURIComponent(r.arg)}`),
-        cachedApi('/api/trades'), b.paper ? null : cachedApi('/api/race?range=Alles', 300000), b.paper ? [] : api('/api/reports'),
-        b.paper ? [] : cachedApi(`/api/transfers?bot=${encodeURIComponent(r.arg)}&range=${ui.range}`, 300000).catch(() => []),
-        !b.paper && ui.range === '1T' ? api(`/api/open?bot=${encodeURIComponent(r.arg)}`).catch(() => []) : []]);
-      const ex = { trades: trades.filter((x) => x.bot === r.arg), transfers, open };
+      const enc = encodeURIComponent(r.arg);
+      const [pts, st, trades, tradesAll, race, reports, transfers, open, teams] = await Promise.all([eq(r.arg), api(`/api/stats?bot=${enc}`),
+        cachedApi('/api/trades?x=1' + fromQ()), cachedApi('/api/trades?x=1'), b.paper ? null : cachedApi('/api/race?range=Alles', 300000),
+        b.paper ? [] : api('/api/reports'),
+        b.paper ? [] : cachedApi(`/api/transfers?bot=${enc}&range=${ui.range}${fromQ()}`, 300000).catch(() => []),
+        !b.paper && isToday() ? api(`/api/open?bot=${enc}`).catch(() => []) : [],
+        b.paper ? [] : cachedApi(`/api/teams?bot=${enc}`, 300000).catch(() => [])]);
+      const ex = { trades: trades.filter((x) => x.bot === r.arg), transfers, open, teams };
       const c = document.getElementById('botchart'); if (c) { c.innerHTML = chartWithSummary(pts, ex); bindScrub(c, pts, ex); }
+      const ti = document.getElementById('teaminfo'); if (ti) showTeam(ti, teams, null);
+      const tl = document.getElementById('teamlist'); if (tl) drawTeamList(tl, teams);
       const t = document.getElementById('bottrades'); if (t) t.innerHTML = tradeRows(st.trades, false);
       const k = document.getElementById('botcoins'); if (k) drawCoins(k, trades, r.arg);
       const fe = document.getElementById('botfees'); if (fe) drawFees(fe, trades.filter((x) => x.bot === r.arg));
-      const ch = document.getElementById('botchips'); if (ch) drawBotChips(ch, b, trades, race, reports);
+      // Note immer ueber die letzten 30 Tage, unabhaengig vom gewaehlten Startdatum
+      const ch = document.getElementById('botchips'); if (ch) drawBotChips(ch, b, tradesAll, race, reports);
     } else if (r.name === 'trade') {
       const box = document.getElementById('tradechart');
       const t = await api(`/api/trade?pid=${encodeURIComponent(r.arg)}`);

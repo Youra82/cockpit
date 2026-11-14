@@ -1156,7 +1156,17 @@ class App:
         return [b['fp'] or b.get('pfp') for b in self.bots if b['name'] == bot and (b['fp'] or b.get('pfp'))]
 
     def span(self, rng):
-        """(Beginn, Bucket-Sekunden) eines Zeitraums."""
+        """(Beginn, Bucket-Sekunden) eines Zeitraums. rng 'from:JJJJ-MM-TT' = frei gewaehltes Startdatum
+        (globales Startdatum der App); das Raster richtet sich nach der Laenge."""
+        if str(rng).startswith('from:'):
+            tz = timezone(timedelta(hours=self.cfg['timezone_offset_hours']))
+            try:
+                since = int(datetime.strptime(rng[5:15], '%Y-%m-%d').replace(tzinfo=tz).timestamp())
+            except ValueError:
+                since = int(time.time() - 89 * 86400)
+            since = min(since, int(time.time()) - 3600)
+            days = (time.time() - since) / 86400
+            return since, 300 if days <= 2 else 1800 if days <= 10 else 3 * 3600 if days <= 45 else 6 * 3600
         span, bucket = {'1T': (86400, 300), '1W': (7 * 86400, 1800), '1M': (30 * 86400, 3 * 3600)}.get(
             rng, (89 * 86400, 6 * 3600))
         since = int(time.time() - span)
@@ -1171,6 +1181,38 @@ class App:
         fps = self.fps_for(bot)
         pts = self.store.equity_series(fps, since, bucket, mode == 'gewinn') if fps else []
         return [{'t': t, 'v': round(v, 2)} for t, v in pts]
+
+    def teams(self, bot):
+        """Teamhistorie des Bots (nur lesen): artifacts/db/team_history.jsonl, sonst die nachgetragene Seed-Datei.
+        Je Eintrag: ab wann, Anlass und die Strategien (Config-Schluessel wie 'ENAUSDTUSDT_15m')."""
+        b = next((x for x in self.bots if x['name'] == bot), None)
+        if not b:
+            return []
+        paths = [os.path.join(b['path'], 'artifacts', 'db', 'team_history.jsonl')]
+        src = os.path.join(b['path'], 'src')
+        try:
+            paths += [os.path.join(src, d, 'utils', 'team_history_seed.jsonl') for d in sorted(os.listdir(src))]
+        except OSError:
+            pass
+        for path in paths:
+            try:
+                with open(path, encoding='utf-8') as f:
+                    rows = [json.loads(line) for line in f if line.strip()]
+            except (OSError, ValueError):
+                continue
+            out = []
+            for r in rows:
+                try:
+                    t = int(datetime.fromisoformat(r['valid_from']).timestamp())
+                except (KeyError, ValueError, TypeError):
+                    continue
+                keys = sorted((r.get('team') or {}).keys())
+                if out and out[-1]['keys'] == keys:
+                    continue   # gleiches Team neu bestaetigt (z. B. Config-Inhalt geaendert) -> kein neuer Zeitraum
+                out.append({'t': t, 'source': str(r.get('source') or '')[:80], 'keys': keys})
+            if out:
+                return out
+        return []
 
     def open_curve(self, bot):
         """Offenes Ergebnis seit 0 Uhr (5-min-Raster). Nur Zeitpunkte, an denen alle Konten gemessen wurden."""
@@ -1283,15 +1325,16 @@ class App:
         with open(path, 'rb') as f:
             return f.read()
 
-    def trades(self):
-        """Alle geschlossenen Trades der letzten 89 Tage, kompakt (Punktwolke, Heatmap, Kosten)."""
+    def trades(self, rng=None):
+        """Geschlossene Trades (Standard: letzte 89 Tage, sonst ab Startdatum), kompakt (Punktwolke, Heatmap, Kosten)."""
         fps = self.fps_for('all')
         if not fps:
             return []
         name_of = {}
         for b in self.bots:
             name_of.setdefault(b['fp'], b['name'])
-        rows = self.store.closes(fps, int((time.time() - 89 * 86400) * 1000))
+        since = self.span(rng)[0] if rng else int(time.time() - 89 * 86400)
+        rows = self.store.closes(fps, int(since * 1000))
         return [{'bot': name_of.get(r['fp']), 'pid': r['pid'], 'sym': r['symbol'], 'side': r['side'], 'net': r['net'], 'pnl': r['pnl'],
                  'fees': r['fees'], 'funding': r['funding'], 'ctime': r['ctime'], 'utime': r['utime'],
                  'size': r['size'], 'open': r['open_price'], 'close': r['close_price']} for r in rows]
@@ -1541,18 +1584,23 @@ def make_handler(app):
                 return self.send_json(app.zones())
             if url.path == '/api/state':
                 return self.send_json(app.poller.snapshot())
+            # globales Startdatum der App (?from=JJJJ-MM-TT) hat Vorrang vor dem Zeitraum
+            frm = q.get('from', '')
+            rng = (lambda d: f'from:{frm}' if len(frm) == 10 and frm[4] == '-' and frm[7] == '-' else q.get('range', d))
             if url.path == '/api/equity':
-                return self.send_json(app.equity(q.get('bot'), q.get('range', '1W'), q.get('mode', 'gewinn')))
+                return self.send_json(app.equity(q.get('bot'), rng('1W'), q.get('mode', 'gewinn')))
             if url.path == '/api/open':
                 return self.send_json(app.open_curve(q.get('bot')))
             if url.path == '/api/transfers':
-                return self.send_json(app.transfers(q.get('bot'), q.get('range', '1M')))
+                return self.send_json(app.transfers(q.get('bot'), rng('1M')))
+            if url.path == '/api/teams':
+                return self.send_json(app.teams(q.get('bot', '')))
             if url.path == '/api/stats':
                 return self.send_json(app.stats(q.get('bot')))
             if url.path == '/api/race':
-                return self.send_json(app.race(q.get('range', 'Alles')))
+                return self.send_json(app.race(rng('Alles')))
             if url.path == '/api/trades':
-                return self.send_json(app.trades())
+                return self.send_json(app.trades(rng(None)))
             if url.path == '/api/events':
                 return self.send_json(app.events())
             if url.path == '/api/trade':
