@@ -6,6 +6,13 @@ const tabs = document.getElementById('tabs');
 let state = null;
 let loading = false;
 const ui = { range: '1M', mode: 'gewinn' };
+let navCount = 0;   // Wechsel innerhalb der App: erst dann fuehrt "Zurueck" per history.back() sicher in die App zurueck
+
+// Merker je Geraet: eingeklappte Abschnitte, Sortierung der Bots, Erklaertexte, gewaehlter Auswertungs-Bereich
+const pref = (() => { try { return JSON.parse(localStorage.getItem('cockpit.ui') || '{}') || {}; } catch (e) { return {}; } })();
+pref.fold = pref.fold && typeof pref.fold === 'object' ? pref.fold : {};
+function savePref() { try { localStorage.setItem('cockpit.ui', JSON.stringify(pref)); } catch (e) { /* gesperrt: gilt nur bis zum Neuladen */ } }
+const isFolded = (key, def) => (key in pref.fold ? pref.fold[key] : def);
 
 // ------------------------------------------------------------------ Helfer
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -154,19 +161,79 @@ function bindScrub(host, points) {
   box.addEventListener('pointerleave', (ev) => { if (ev.pointerType === 'mouse') hide(); });
 }
 
+// Einklappbarer Abschnitt. Der Inhalt wird immer gezeichnet und nur versteckt, damit Diagramme ihre Box finden.
+function fold(key, title, sub, body, def = false) {
+  const closed = isFolded(key, def);
+  return `<section class="fold${closed ? ' closed' : ''}" data-fold="${key}">
+    <button type="button" class="foldh" aria-expanded="${!closed}"><b>${title}</b><small>${sub}</small>${icon.chev}</button>
+    <div class="foldb">${body}</div></section>`;
+}
+
+// Alarme der angezeigten Bots (ausgeblendete Bots liefern nur markierte, kritische Alarme)
+const liveAlerts = () => state.alerts.filter((a) => !a.hidden);
+const shortAlert = {
+  'Position ohne Stop-Loss': 'kein SL', 'Bot läuft nicht': 'steht', 'Order ohne Position': 'Order ohne Pos.',
+  'Liquidation vor Stop-Loss': 'Liq. vor SL', 'Nahe an der Liquidation': 'nahe Liq.', Liquidation: 'liquidiert',
+  'Bitget-Abfrage fehlgeschlagen': 'Abfrage-Fehler', 'Papierkonto aktualisiert sich nicht': 'veraltet',
+};
+function botAlarm(name) {
+  const a = liveAlerts().filter((x) => x.bot === name && x.level !== 'info');
+  if (!a.length) return '';
+  const lvl = a.some((x) => x.level === 'crit') ? 'crit' : 'warn';
+  return `<span class="pill ${lvl}">${a.length > 1 ? `${a.length} Alarme` : esc(shortAlert[a[0].title] || 'Alarm')}</span>`;
+}
+
+// Reihenfolge der Bots: fest (wie in config.json), nach Gewinn heute oder nach Kontostand
+function sortedBots(list) {
+  const s = pref.sort || 'fest', out = [...list];
+  if (s === 'gewinn') out.sort((a, b) => (b.pnl_today || 0) - (a.pnl_today || 0));
+  if (s === 'konto') out.sort((a, b) => (b.equity || 0) - (a.equity || 0));
+  return out;
+}
+const sortSeg = () => `<div class="seg" role="group" aria-label="Reihenfolge der Bots">${[['fest', 'fest'], ['gewinn', 'Gewinn'], ['konto', 'Konto']]
+  .map(([k, l]) => `<button type="button" data-sort="${k}" class="${(pref.sort || 'fest') === k ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+const hiddenCount = () => (state.detected || []).filter((d) => !d.shown).length;
+
 // ------------------------------------------------------------------ Ansichten
 function header(title, sub, back) {
   return `<div class="head">
-    ${back ? `<a class="round" href="#/" aria-label="Zurück">${icon.back}</a>` : ''}
+    ${back ? `<a class="round" href="#/" id="back" aria-label="Zurück">${icon.back}</a>` : ''}
     <div class="t">${sub ? `<small>${sub}</small>` : ''}<h1 class="${back ? 'sm' : ''}">${title}</h1></div>
     <button class="round${loading ? ' spin' : ''}" id="reload" aria-label="Aktualisieren">${icon.refresh}</button>
   </div>`;
 }
 
+// Rote (bzw. orange) Leiste oben in der Uebersicht, auf- und zuklappbar
+function alertBar() {
+  const a = liveAlerts().filter((x) => x.level !== 'info');
+  if (!a.length) return '';
+  const closed = isFolded('alertbar', false), crit = a.some((x) => x.level === 'crit');
+  return `<section class="abar ${crit ? 'crit' : 'warn'}${closed ? ' closed' : ''}" data-fold="alertbar">
+    <button type="button" class="foldh" aria-expanded="${!closed}"><span class="aic" aria-hidden="true">!</span>
+      <span class="t"><b>${a.length} Alarm${a.length > 1 ? 'e' : ''}</b>
+      <span class="sum">${a.slice(0, 3).map((x) => esc((x.bot ? `${x.bot}: ` : '') + (shortAlert[x.title] || x.title))).join(' · ')}</span></span>${icon.chev}</button>
+    <div class="foldb">${a.slice(0, 6).map((x) => `<a class="abi" href="${x.bot ? `#/bot/${encodeURIComponent(x.bot)}` : '#/alarme'}">
+      <b>${esc(x.title)}${x.bot ? ` <span>· ${esc(x.bot)}</span>` : ''}</b><span>${esc(x.text)}</span></a>`).join('')}
+      <a class="abl" href="#/alarme">${a.length > 6 ? `+ ${a.length - 6} weitere · ` : ''}Alle Alarme und Zeitleiste ›</a></div></section>`;
+}
+
+function botRow(b) {
+  const status = b.paper ? `Papierkonto · ${b.running ? 'läuft' : 'steht'} · ${ago(b.last_activity)}`
+    : !b.has_key ? 'kein API-Schlüssel gefunden' : b.running ? `läuft · ${ago(b.last_activity)}` : `steht · letzter Lauf ${ago(b.last_activity)}`;
+  const right = b.paper ? `<b class="${cls(b.pnl_today)}">${signed(b.pnl_today)}</b><span>${nf(b.equity)} USDT · ${(b.paper.open || []).length} Pos.</span>`
+    : `<b class="${cls(b.pnl_today)}">${b.has_key ? signed(b.pnl_today) : '—'}</b><span>${b.has_key ? `${nf(b.equity)} USDT · ${b.positions.length} Pos.` : ''}</span>`;
+  return `<a class="bot${b.paper ? ' paper' : ''}" href="#/bot/${encodeURIComponent(b.name)}">
+    <span class="dot ${b.running ? 'on' : 'off'}" aria-hidden="true"></span>
+    <div class="t"><b>${esc(b.name)}${botAlarm(b.name)}</b><span>${status}</span></div>
+    <div class="r">${right}</div>${icon.chev}</a>`;
+}
+
 function viewHome() {
   const t = totals(state.bots);
-  const bots = [...state.bots].sort((a, b) => (b.running - a.running) || ((b.pnl_today || 0) - (a.pnl_today || 0)));
+  const bots = sortedBots(state.bots.filter((b) => !b.paper)), paper = state.bots.filter((b) => b.paper);
+  const nh = hiddenCount();
   return `${header('Bot-Cockpit', `Bitget · aktualisiert ${ago(state.updated)}`)}
+  ${alertBar()}
   <div class="card">
     <span class="lbl">Gesamtkapital (alle Konten, inkl. offener Positionen)</span>
     <span class="big">${nf(t.equity)} <small>USDT</small></span>
@@ -179,29 +246,15 @@ function viewHome() {
     <div class="tile"><span class="lbl">Positionen</span><b>${t.positions}</b></div>
     <div class="tile"><span class="lbl">Trades heute</span><b>${t.trades}</b></div>
   </div>
-  <h2>Meine Bots <small>Zahl = realisiert heute</small></h2>
-  ${bots.map((b) => {
-    const status = b.paper ? `Papierkonto · ${b.running ? 'läuft' : 'steht'} · ${ago(b.last_activity)}`
-      : !b.has_key ? 'kein API-Schlüssel gefunden' : b.running ? `läuft · ${ago(b.last_activity)}` : `steht · letzter Lauf ${ago(b.last_activity)}`;
-    if (b.paper) return `<a class="bot" href="#/bot/${encodeURIComponent(b.name)}">
-      <span class="dot ${b.running ? 'on' : 'off'}" aria-hidden="true"></span>
-      <div class="t"><b>${esc(b.name)}</b><span>${status}</span></div>
-      <div class="r"><b class="${cls(b.pnl_today)}">${signed(b.pnl_today)}</b>
-        <span>${nf(b.equity)} USDT · ${b.paper.open.length} Pos. · Papier</span></div>
-      ${icon.chev}</a>`;
-    return `<a class="bot" href="#/bot/${encodeURIComponent(b.name)}">
-      <span class="dot ${b.running ? 'on' : 'off'}" aria-hidden="true"></span>
-      <div class="t"><b>${esc(b.name)}</b><span>${status}</span></div>
-      <div class="r"><b class="${cls(b.pnl_today)}">${b.has_key ? signed(b.pnl_today) : '—'}</b>
-        <span>${b.has_key ? `${nf(b.equity)} USDT · ${b.positions.length} Pos.` : ''}</span></div>
-      ${icon.chev}</a>`;
-  }).join('')}
-  <h2>Alle offenen Positionen <small>${t.positions} in ${state.bots.filter((b) => b.positions.length).length} Bots · antippen</small></h2>
-  <div class="card" id="allpos"></div>
-  <h2>Worst Case <small>alle Stops / BTC-Szenario</small></h2>
-  <div class="card" id="worst"><div class="empty">lädt …</div></div>
-  <h2>Funding-Uhr <small>nächste Zahlung</small></h2>
-  <div class="card" id="funding"><div class="empty">lädt …</div></div>`;
+  <div class="h2row"><div><b>Meine Bots</b><span class="lbl">Zahl = realisiert heute</span></div>${sortSeg()}</div>
+  ${bots.map(botRow).join('')}
+  ${nh ? `<a class="hint" href="#/system"><span class="grow">${nh} weitere${nh > 1 ? '' : 'r'} Bot${nh > 1 ? 's' : ''} erkannt, ausgeblendet</span><b>System ›</b></a>` : ''}
+  ${paper.length ? `<h2>Papierkonten <small>zählen nicht zum Gesamtkapital</small></h2>${paper.map(botRow).join('')}` : ''}
+  ${fold('pos', 'Offene Positionen', `${t.positions} in ${state.bots.filter((b) => b.positions.length).length} Bots · antippen`, '<div class="card" id="allpos"></div>')}
+  ${fold('risk', 'Risiko jetzt', 'Worst Case · Funding · Verteilung', `
+    <h3>Worst Case <small>alle Stops / BTC-Szenario</small></h3><div class="card" id="worst"><div class="empty">lädt …</div></div>
+    <h3>Funding-Uhr <small>nächste Zahlung</small></h3><div class="card" id="funding"><div class="empty">lädt …</div></div>
+    <h3>Wo mein Geld gerade steckt <small>Segment antippen</small></h3><div class="card" id="expo"></div>`)}`;
 }
 
 // Positionen aller Bots, gemeinsam genutzte Konten nur einmal
@@ -268,6 +321,7 @@ function viewBot(name) {
   const otherOrders = b.orders.filter((o) => !(o.reduce && protectedSyms.has(o.symbol)) && o.kind !== 'tpsl');
   const status = b.running ? `läuft · letzter Lauf ${ago(b.last_activity)}` : `steht · letzter Lauf ${ago(b.last_activity)}`;
   return `${header(esc(b.name), `<span class="dot ${b.running ? 'on' : 'off'}" style="display:inline-block;width:8px;height:8px;margin-right:6px"></span>${status}`, true)}
+  <div class="chips" id="botchips">${b.git ? `<span class="chip mono">${esc(b.git.hash)}</span>` : ''}</div>
   ${b.error ? `<div class="note">Bitget-Abfrage fehlgeschlagen: ${esc(b.error)}</div>` : ''}
   ${b.shared_with.length ? `<div class="note">Gemeinsames Konto mit ${esc(b.shared_with.join(', '))} – Zahlen gelten für beide.</div>` : ''}
   <div class="card">
@@ -279,16 +333,28 @@ function viewBot(name) {
   </div>
   <h2>Offene Positionen <small>${b.positions.length}</small></h2>
   <div class="card" id="botpos"></div>
-  ${otherOrders.length ? `<h2>Wartende Orders <small>${otherOrders.length}</small></h2>
-    <div class="card tight">${otherOrders.slice(0, 8).map((o) => `<div class="li"><span class="grow">${esc(coin(o.symbol))}</span>
+  ${otherOrders.length ? fold('orders', 'Wartende Orders', `${otherOrders.length} · ${[...new Set(otherOrders.map((o) => coin(o.symbol).split('/')[0]))].slice(0, 3).map(esc).join(', ')}`,
+    `<div class="card tight">${otherOrders.slice(0, 8).map((o) => `<div class="li"><span class="grow">${esc(coin(o.symbol))}</span>
       <span class="muted">${o.kind === 'trail' ? 'Trailing' : o.kind === 'trigger' ? 'Trigger' : 'Limit'} ${esc(o.side || '')}</span>
       <span class="mono">${price(o.trigger || o.price)}</span></div>`).join('')}
-      ${otherOrders.length > 8 ? `<div class="li muted">… und ${otherOrders.length - 8} weitere</div>` : ''}</div>` : ''}
+      ${otherOrders.length > 8 ? `<div class="li muted">… und ${otherOrders.length - 8} weitere</div>` : ''}</div>`, true) : ''}
   <h2>Letzte Trades <small>antippen für Chart</small></h2>
   <div class="card tight" id="bottrades"><div class="empty">lädt …</div></div>
   <h2>Welche Coins bringen Geld? <small>90 Tage</small></h2>
   <div class="card" id="botcoins"><div class="empty">lädt …</div></div>
+  <h2>Gebühren <small>30 Tage</small></h2>
+  <div class="card" id="botfees"><div class="empty">lädt …</div></div>
   ${b.git ? `<div class="lbl" style="text-align:center">Version ${esc(b.git.hash)} · ${esc(b.git.subject)}</div>` : ''}`;
+}
+
+// Kopf der Bot-Seite: Note aus dem Zeugnis, Ampel Live gegen Backtest, Version
+function drawBotChips(box, b, trades, race, reports) {
+  const it = gradeItems([b], trades, race, reports)[0];
+  const rep = reportInfo(reports.find((x) => x.bot === b.name) || {});
+  const gc = it ? { A: '--up', B: '--up', C: '--warn', D: '--down', E: '--down' }[it.grade] : null;
+  box.innerHTML = `${it ? `<a class="chip" href="#/auswertung" style="color:var(${gc})" data-atabgo="bots">Note ${it.grade} <small class="mono">${it.pts}/100</small></a>` : ''}
+    <span class="chip"><span class="lamp ${rep.lamp}"></span>${rep.short}</span>
+    ${b.git ? `<span class="chip mono">${esc(b.git.hash)}</span>` : ''}`;
 }
 
 // SL greift vor der Liquidation -> Abstand ist unkritisch, nur grau zeigen
@@ -341,21 +407,29 @@ function tradeRows(trades, withBot) {
     <b class="mono ${cls(t.net)}">${signed(t.net)}</b>${icon.chev}</a>`).join('');
 }
 
+const ALERT_FOLDS = ['al_crit', 'al_warn', 'al_info', 'al_hid', 'al_tl'];
 function viewAlerts() {
-  const a = state.alerts;
-  return `${header('Alarme', `${a.length} offen`)}
-  ${a.length ? a.map((x) => `<div class="alert ${x.level}"><span class="ic" aria-hidden="true">!</span>
+  const live = liveAlerts(), hid = state.alerts.filter((a) => a.hidden);
+  const card = (x) => `<div class="alert ${x.level}"><span class="ic" aria-hidden="true">!</span>
     <div class="t"><b>${esc(x.title)}${x.bot ? ` <span class="muted" style="font-weight:400">· ${esc(x.bot)}</span>` : ''}</b>
-    <span>${esc(x.text)}</span></div></div>`).join('') : '<div class="ok">Alles in Ordnung – kein Alarm.</div>'}
-  <div class="lbl" style="text-align:center">Geprüft: Bot läuft, Stop-Loss vorhanden, Abstand zur Liquidation, gleiche Coins in mehreren Bots, Orders ohne Position, Bitget erreichbar.</div>
-  <h2>Mitteilungen <small>aufs iPhone</small></h2>
-  <div class="card" id="pushbox"><div class="empty">lädt …</div></div>
-  <h2>Was ist passiert? <small>letzte 7 Tage</small></h2>
-  <div class="card" id="timeline"><div class="empty">lädt …</div></div>`;
+    <span>${esc(x.text)}</span></div></div>`;
+  const grp = (key, title, lvl, list, def) => (list.length ? fold(key, `${title} <span class="pill ${lvl}">${list.length}</span>`,
+    [...new Set(list.map((x) => x.bot || 'alle'))].slice(0, 3).map(esc).join(', '), `<div class="alist">${list.map(card).join('')}</div>`, def) : '');
+  const open = ALERT_FOLDS.some((k) => !isFolded(k, k === 'al_info' || k === 'al_hid'));
+  const n = live.filter((a) => a.level !== 'info').length;
+  return `${header('Alarme', `${n} offen${hid.length ? ` · ${hid.length} von ausgeblendeten Bots` : ''}`)}
+  <div class="row" style="justify-content:flex-end"><button class="btn ghost sm" id="foldall" type="button">${open ? 'Alle einklappen' : 'Alle aufklappen'}</button></div>
+  ${live.length ? '' : '<div class="ok">Alles in Ordnung – kein Alarm.</div>'}
+  ${grp('al_crit', 'Kritisch', 'crit', live.filter((a) => a.level === 'crit'), false)}
+  ${grp('al_warn', 'Warnung', 'warn', live.filter((a) => a.level === 'warn'), false)}
+  ${grp('al_info', 'Hinweise', 'info', live.filter((a) => a.level === 'info'), true)}
+  ${grp('al_hid', 'Ausgeblendete Bots', 'info', hid, true)}
+  ${fold('al_tl', 'Was ist passiert?', 'letzte 7 Tage', '<div class="card" id="timeline"><div class="empty">lädt …</div></div>')}
+  <div class="lbl" style="text-align:center">Geprüft: Bot läuft, Stop-Loss vorhanden, Abstand zur Liquidation, gleiche Coins in mehreren Bots, Orders ohne Position, Bitget erreichbar. Mitteilungen einstellen: unter System.</div>`;
 }
 
 function viewTrade(pid) {
-  return `<div class="head"><a class="round" href="#/" id="tradeback" aria-label="Zurück">${icon.back}</a>
+  return `<div class="head"><a class="round" href="#/" id="back" aria-label="Zurück">${icon.back}</a>
     <div class="t"><small>geschlossener Trade</small><h1 class="sm">Trade im Chart</h1></div><span></span></div>
   <div class="card"><div id="tradechart"><div class="empty">lädt Kerzen …</div></div></div>
   <div class="lbl" style="text-align:center">Kerzen von Bitgets öffentlichen Marktdaten, eine Abfrage beim Öffnen, ohne API-Schlüssel. Blau hinterlegt: Zeit im Trade.</div>`;
@@ -410,30 +484,37 @@ async function pushPanel(box) {
   });
 }
 
+// ------------------------------------------------------------------ Auswertung in vier Bereichen (nur der gewaehlte wird geladen)
+const GROUPS = [['ergebnis', 'Ergebnis'], ['bots', 'Bots'], ['trades', 'Trades'], ['markt', 'Markt']];
+const curGroup = () => (GROUPS.some(([k]) => k === pref.atab) ? pref.atab : 'ergebnis');
+
 function viewStats() {
-  const t = totals(state.bots);
-  const g = state.goal;
-  const start = new Date(g.start).getTime(), end = new Date(g.end).getTime();
-  const soll = Math.max(0, Math.min(100, (Date.now() - start) / (end - start) * 100));
-  const ist = Math.min(100, t.equity / g.usdt * 100);
-  return `${header('Auswertung', 'alle aktiven Bots')}
-  <div class="card">
-    <h2 style="margin:0">Ziel ${nf(g.usdt, 0)} USDT <small>bis ${new Date(g.end).toLocaleDateString('de-DE')} · <button class="linkbtn" id="goaledit" type="button">Ändern</button></small></h2>
-    <form class="goalform" id="goalform" hidden>
-      <label>Ziel (USDT)<input type="number" id="g_usdt" inputmode="decimal" min="1" step="any" value="${g.usdt}" required></label>
-      <label>Start<input type="date" id="g_start" value="${esc(g.start)}" required></label>
-      <label>Bis<input type="date" id="g_end" value="${esc(g.end)}" required></label>
-      <div class="row"><button class="btn" type="submit">Speichern</button><button class="btn ghost" type="button" id="goalcancel">Abbrechen</button></div>
-      <div class="err" id="goalerr" role="alert"></div>
-    </form>
-    <div class="goalbar"><i style="width:${ist}%"></i><em style="left:${soll}%"></em></div>
-    <div style="display:flex;justify-content:space-between;font-size:12px"><b style="color:var(--accent)">${nf(ist, 1)} % erreicht</b><span class="warn">Zeit vergangen: ${nf(soll, 0)} %</span></div>
-    <span class="lbl">Kapital jetzt ${nf(t.equity)} USDT. Einzahlungen sind hier noch enthalten.</span>
-  </div>
+  const g = curGroup(), nh = hiddenCount();
+  return `${header('Auswertung', `${state.bots.length} angezeigte Bots`)}
+  <div class="tabseg" role="tablist" aria-label="Bereich">${GROUPS.map(([k, l]) => `<button type="button" role="tab" data-atab="${k}"
+    aria-selected="${k === g}" class="${k === g ? 'on' : ''}">${l}</button>`).join('')}</div>
+  ${nh ? `<a class="hint" href="#/system"><span class="grow">Ohne ${nh} ausgeblendete${nh > 1 ? '' : 'n'} Bot${nh > 1 ? 's' : ''}</span><b>ändern ›</b></a>` : ''}
   <div id="statsbody"><div class="card"><div class="empty">lädt …</div></div></div>`;
 }
 
-function statsBody(s) {
+// Ueberschrift mit i-Knopf; die Erklaerung steht in der Karte und ist nur auf Wunsch sichtbar
+const viz = (id, title, sub, q) => `<h2>${title} <span class="h2r"><small>${sub}</small><button type="button" class="ibtn" aria-label="Erklärung: ${title}">i</button></span></h2>
+  <div class="card"><p class="q"${pref.explain ? '' : ' hidden'}>${q}</p><div id="${id}"><div class="empty">lädt …</div></div></div>`;
+
+function goalCard() {
+  const t = totals(state.bots), g = state.goal;
+  const start = new Date(g.start).getTime(), end = new Date(g.end).getTime();
+  const soll = Math.max(0, Math.min(100, (Date.now() - start) / (end - start) * 100));
+  const ist = Math.min(100, t.equity / g.usdt * 100);
+  return `<div class="card">
+    <h2 style="margin:0">Ziel ${nf(g.usdt, 0)} USDT <small>bis ${new Date(g.end).toLocaleDateString('de-DE')} · <a class="linkbtn" href="#/system" data-foldopen="sys_goal">Ändern</a></small></h2>
+    <div class="goalbar"><i style="width:${ist}%"></i><em style="left:${soll}%"></em></div>
+    <div style="display:flex;justify-content:space-between;font-size:12px"><b style="color:var(--accent)">${nf(ist, 1)} % erreicht</b><span class="warn">Zeit vergangen: ${nf(soll, 0)} %</span></div>
+    <span class="lbl">Kapital jetzt ${nf(t.equity)} USDT. Einzahlungen sind hier noch enthalten.</span>
+  </div>`;
+}
+
+function calCard(s) {
   const now = new Date();
   const y = now.getFullYear(), m = now.getMonth();
   const first = (new Date(y, m, 1).getDay() + 6) % 7;
@@ -452,31 +533,58 @@ function statsBody(s) {
     }
     cells += `<div class="${d === now.getDate() ? 'today' : ''}" style="${style}">${d}${v != null ? `<small>${signed(v, 0)}</small>` : ''}</div>`;
   }
-  const tt = s.totals;
-  const viz = (id, title, sub, q) => `<h2>${title} <small>${sub}</small></h2>
-  <div class="card"><p class="q">${q}</p><div id="${id}"><div class="empty">lädt …</div></div></div>`;
-  return `<h2>Monatsrückblick <small>zum Wischen</small></h2><div class="card"><div id="vizM"><div class="empty">lädt …</div></div></div>
-  ${viz('vizS', 'Bot-Zeugnis', 'Note je Bot', 'Welcher Bot läuft gut, welcher braucht Aufmerksamkeit? Zeile antippen zeigt die Begründung.')}
-  ${viz('vizL', 'Live gegen Backtest', 'täglicher Check der Bots', 'Macht jeder Bot live, was sein Backtest erwartet? Zeile antippen zeigt den Grund.')}
-  ${viz('vizA', 'Rückgang vom Höchststand', '90 Tage', 'Wie tief liege ich unter meinem besten Stand, und wie lange hat die Erholung gedauert?')}
-  ${viz('vizB', 'Bot-Rennen', 'Start = 100', 'Welcher Bot entwickelt sich am besten, egal wie viel Geld auf seinem Konto liegt?')}
-  ${viz('vizO', 'Bots gegen BTC halten', 'beide ab 100', 'Hätten die Bots mehr gebracht, als das Geld einfach in BTC zu stecken? Finger über die Kurve.')}
-  ${viz('vizP', 'Ziel-Prognose', 'bei gleichem Tempo', 'Wann wäre das Ziel erreicht, wenn es so weitergeht wie zuletzt?')}
-  <h2>${now.toLocaleDateString('de-DE', { month: 'long', year: 'numeric' })} <small>Gewinn pro Tag (USDT)</small></h2>
-  <div class="card"><div class="cal">${cells}</div></div>
-  ${viz('vizC', 'Wohin das Geld geht', 'Zeitraum wählbar', 'Was bringen die Trades, und was fressen Gebühren und Funding wieder auf?')}
-  ${viz('vizU', 'Gebühren-Spiegel', '30 Tage', 'Wie viel zahlt jeder Bot an Gebühren, und wie viel wäre mit Limit-Orders sparbar?')}
-  ${viz('vizD', 'Jeder Trade ein Punkt', '90 Tage', 'Verlieren lange Trades öfter? Tragen wenige Ausreißer das Ergebnis? Punkt antippen.')}
-  ${viz('vizE', 'Wann verdienen die Bots?', '90 Tage', 'Summe der Trades je Wochentag und Stunde, in der sie geschlossen wurden. Feld antippen.')}
-  ${viz('vizF', 'Wo mein Geld gerade steckt', 'offene Positionen', 'Positionsgröße je Coin über alle Bots, dazu Long gegen Short. Segment antippen.')}
-  ${viz('vizQ', 'Marktphase jetzt', 'BTC Tageschart', 'In welcher Phase ist der Markt, und wie schneiden deine Bots in genau dieser Phase ab?')}
-  ${viz('vizK', 'Welche Coins bringen Geld?', '90 Tage', 'Gewinn und Verlust je Coin, für jeden Bot einzeln.')}
-  <h2>Letzte Trades <small>${tt.count || 0} in 90 Tagen · antippen für Chart</small></h2>
-  <div class="card tight">${tradeRows(s.trades, true)}</div>`;
+  return `<h2>${now.toLocaleDateString('de-DE', { month: 'long', year: 'numeric' })} <small>Gewinn pro Tag (USDT)</small></h2>
+  <div class="card"><div class="cal">${cells}</div></div>`;
 }
 
-function viewServer() {
-  const s = state.server;
+function groupBody(g, d) {
+  if (g === 'ergebnis') return `${goalCard()}
+  <h2>Monatsrückblick <small>zum Wischen</small></h2><div class="card"><div id="vizM"><div class="empty">lädt …</div></div></div>
+  ${calCard(d.stats)}
+  ${viz('vizA', 'Rückgang vom Höchststand', '90 Tage', 'Wie tief liege ich unter meinem besten Stand, und wie lange hat die Erholung gedauert?')}
+  ${viz('vizP', 'Ziel-Prognose', 'bei gleichem Tempo', 'Wann wäre das Ziel erreicht, wenn es so weitergeht wie zuletzt?')}`;
+  if (g === 'bots') return `${viz('vizS', 'Zeugnis &amp; Live gegen Backtest', 'Note je Bot', 'Welcher Bot läuft gut, welcher braucht Aufmerksamkeit? Die Note setzt sich aus Laufen, Live gegen Backtest, Gewinn, Rückgang und Gebühren zusammen. Zeile antippen zeigt die Begründung und den täglichen Live-Check des Bots.')}
+  ${viz('vizB', 'Bot-Rennen', 'Start = 100', 'Welcher Bot entwickelt sich am besten, egal wie viel Geld auf seinem Konto liegt?')}
+  ${viz('vizK', 'Welche Coins bringen Geld?', '90 Tage', 'Gewinn und Verlust je Coin, für jeden Bot einzeln.')}
+  ${viz('vizU', 'Gebühren-Spiegel', '30 Tage', 'Wie viel zahlt jeder Bot an Gebühren, und wie viel wäre mit Limit-Orders sparbar?')}`;
+  if (g === 'trades') return `${viz('vizC', 'Wohin das Geld geht', 'Zeitraum wählbar', 'Was bringen die Trades, und was fressen Gebühren und Funding wieder auf?')}
+  ${viz('vizD', 'Jeder Trade ein Punkt', '90 Tage', 'Verlieren lange Trades öfter? Tragen wenige Ausreißer das Ergebnis? Punkt antippen.')}
+  ${viz('vizE', 'Wann verdienen die Bots?', '90 Tage', 'Summe der Trades je Wochentag und Stunde, in der sie geschlossen wurden. Feld antippen.')}
+  <h2>Letzte Trades <small>${d.stats.totals.count || 0} in 90 Tagen · antippen für Chart</small></h2>
+  <div class="card tight">${tradeRows(d.stats.trades, true)}</div>`;
+  return `${viz('vizQ', 'Marktphase jetzt', 'BTC Tageschart', 'In welcher Phase ist der Markt, und wie schneiden deine Bots in genau dieser Phase ab?')}
+  ${viz('vizO', 'Bots gegen BTC halten', 'beide ab 100', 'Hätten die Bots mehr gebracht, als das Geld einfach in BTC zu stecken? Finger über die Kurve.')}`;
+}
+
+const NEEDS = { ergebnis: ['stats', 'trades', 'dd'], bots: ['trades', 'race', 'reports'], trades: ['stats', 'trades'], markt: ['trades', 'dd', 'market'] };
+const FETCH = {
+  stats: () => api('/api/stats?bot=all'), trades: () => api('/api/trades'), race: () => api('/api/race?range=Alles'),
+  dd: () => api('/api/equity?bot=all&range=Alles&mode=gewinn'), reports: () => api('/api/reports'),
+  market: () => api('/api/market').catch(() => null),
+};
+
+async function loadStats(el) {
+  const g = curGroup(), keys = NEEDS[g];
+  const vals = await Promise.all(keys.map((k) => FETCH[k]()));
+  if (!el.isConnected || curGroup() !== g) return;
+  const d = Object.fromEntries(keys.map((k, i) => [k, vals[i]]));
+  el.innerHTML = groupBody(g, d);
+  const box = (id) => document.getElementById(id);
+  if (g === 'ergebnis') {
+    drawRecap(box('vizM'), d.trades, d.dd); drawDrawdown(box('vizA'), d.dd); drawForecast(box('vizP'), d.dd, state.goal);
+  } else if (g === 'bots') {
+    drawGrades(box('vizS'), state.bots, d.trades, d.race, d.reports); drawRace(box('vizB'), d.race);
+    drawCoins(box('vizK'), d.trades); drawFees(box('vizU'), d.trades);
+  } else if (g === 'trades') {
+    drawCosts(box('vizC'), d.trades); drawScatter(box('vizD'), d.trades); drawHeatmap(box('vizE'), d.trades);
+  } else {
+    drawPhase(box('vizQ'), d.market, d.trades); drawVsBtc(box('vizO'), d.dd, d.market);
+  }
+}
+
+// ------------------------------------------------------------------ System: alle Einstellungen an einem Ort
+function viewSystem() {
+  const s = state.server, g = state.goal, det = state.detected || [];
   const gb = (v) => v == null ? '—' : nf(v / 1073741824, 1);
   const bar = (used, total, label, txt) => {
     const pct = used != null && total ? used / total * 100 : null;
@@ -485,14 +593,29 @@ function viewServer() {
       <div class="bar"><i style="width:${pct ?? 0}%;background:${col}"></i></div>
       <span class="mono muted" style="width:96px;text-align:right">${txt}</span></div>`;
   };
-  const up = s.uptime_s ? `läuft seit ${Math.floor(s.uptime_s / 86400)} T ${Math.floor(s.uptime_s % 86400 / 3600)} h` : '';
-  return `${header('Server', up)}
+  const up = s.uptime_s ? `Server läuft seit ${Math.floor(s.uptime_s / 86400)} T ${Math.floor(s.uptime_s % 86400 / 3600)} h` : '';
+  const nShown = det.filter((d) => d.shown).length;
+  return `${header('System', up)}
+  <h2>Bots im Cockpit <small>${nShown} angezeigt · ${det.length - nShown} ausgeblendet</small></h2>
+  <div class="card tight" id="botvis">
+    <p class="lbl" style="margin:10px 0 4px;line-height:1.45">Automatisch erkannt: jeder Bot-Ordner auf dem Server mit <span class="mono">secret.json</span>, dazu Papierkonten.
+      Ausgeblendete Bots zählen nirgends mit – nicht im Gesamtkapital, nicht bei Positionen und Alarmen, nicht in der Auswertung.
+      Neu gefundene Bots starten ausgeblendet. An den Bots selbst ändert sich nichts.</p>
+    ${det.map((d) => `<label class="tg"><span class="tgl"><span class="tgn"><b>${esc(d.name)}</b>${d.new ? '<span class="pill info">neu erkannt</span>' : ''}${d.paper ? '<span class="pill paper">Papier</span>' : ''}</span>
+      <small>${!d.paper && !d.has_key ? 'kein API-Schlüssel · ' : ''}${d.running ? 'läuft' : 'steht'} · ${d.last_activity ? `letzter Lauf ${ago(d.last_activity)}` : 'kein Log gefunden'}${d.equity != null ? ` · ${nf(d.equity)} USDT` : ''}</small></span>
+      <input type="checkbox" class="sw" data-vis="${esc(d.name)}"${d.shown ? ' checked' : ''} aria-label="${esc(d.name)} anzeigen"></label>`).join('')}
+    <label class="tg"><span class="tgl"><span>Kritische Alarme ausgeblendeter Bots trotzdem melden</span>
+      <small>Nur „kein Stop-Loss“ und Liquidationsgefahr. Dafür fragt das Cockpit diese Konten weiter bei Bitget ab (nur lesend).</small></span>
+      <input type="checkbox" class="sw" id="crithid"${state.crit_hidden ? ' checked' : ''}></label>
+    <div class="err" id="viserr" role="alert"></div>
+  </div>
+  <h2>Server</h2>
   <div class="card" style="gap:2px">
     ${bar(s.cpu_pct, 100, 'Prozessor', s.cpu_pct == null ? '—' : nf(s.cpu_pct, 0) + ' %')}
     ${bar(s.mem_used, s.mem_total, 'RAM', `${gb(s.mem_used)} / ${gb(s.mem_total)} GB`)}
     ${bar(s.disk_used, s.disk_total, 'Speicher', `${gb(s.disk_used)} / ${gb(s.disk_total)} GB`)}
   </div>
-  <h2>Bots auf dem Server</h2>
+  <h2>Bots auf dem Server <small>angezeigte</small></h2>
   <div class="card tight">${state.bots.map((b) => `<div class="li" style="flex-direction:column;align-items:stretch;gap:4px">
     <div style="display:flex;align-items:center;gap:8px"><b class="grow">${esc(b.name)}</b>
       <span class="tag" style="${b.running ? 'color:var(--up);background:var(--up-bg)' : 'color:var(--down);background:var(--down-bg)'}">${b.running ? 'läuft' : 'steht'}</span></div>
@@ -500,9 +623,34 @@ function viewServer() {
       <span class="mono">${b.git ? esc(b.git.hash) + ' · ' + new Date(b.git.date).toLocaleDateString('de-DE') : 'keine Git-Version'}</span>
       <span>letzter Lauf ${ago(b.last_activity)}</span>
       <span>alle ${b.cycle} min</span></div></div>`).join('')}</div>
-  <div class="lbl" style="text-align:center">Bitget wird alle ${state.poll_seconds} s abgefragt – nur lesend.</div>
-  <h2>Siri <small>„Wie stehen meine Bots?“</small></h2>
-  <div class="card" id="siribox"><div class="empty">lädt …</div></div>`;
+  ${fold('sys_push', 'Mitteilungen', 'aufs iPhone', '<div class="card" id="pushbox"><div class="empty">lädt …</div></div>')}
+  ${fold('sys_goal', 'Ziel', `${nf(g.usdt, 0)} USDT bis ${new Date(g.end).toLocaleDateString('de-DE')}`, `<div class="card">
+    <form class="goalform" id="goalform" style="margin:0">
+      <label>Ziel (USDT)<input type="number" id="g_usdt" inputmode="decimal" min="1" step="any" value="${g.usdt}" required></label>
+      <label>Start<input type="date" id="g_start" value="${esc(g.start)}" required></label>
+      <label>Bis<input type="date" id="g_end" value="${esc(g.end)}" required></label>
+      <div class="row"><button class="btn" type="submit">Speichern</button></div>
+      <div class="err" id="goalerr" role="alert"></div>
+    </form></div>`, true)}
+  ${fold('sys_view', 'Darstellung', 'Reihenfolge · Erklärtexte', `<div class="card tight">
+    <div class="tg"><span>Reihenfolge der Bots</span>${sortSeg()}</div>
+    <label class="tg"><span class="tgl"><span>Erklärtexte immer zeigen</span><small>Aus: nur nach Tippen auf i</small></span>
+      <input type="checkbox" class="sw" id="explain"${pref.explain ? ' checked' : ''}></label>
+    <div class="tg"><span class="tgl"><span>Auf- und zugeklappte Abschnitte</span><small>${Object.keys(pref.fold).length} gemerkt</small></span>
+      <button class="btn ghost sm" id="foldreset" type="button">Zurücksetzen</button></div></div>`, true)}
+  ${fold('sys_siri', 'Siri', '„Wie stehen meine Bots?“', '<div class="card" id="siribox"><div class="empty">lädt …</div></div>', true)}
+  <div class="lbl" style="text-align:center">Bitget wird alle ${state.poll_seconds} s abgefragt – nur lesend.</div>`;
+}
+
+// Anzeige ein-/ausblenden: gilt sofort fuer Uebersicht, Alarme und Auswertung (Server merkt es sich in data/bots.json)
+async function saveVisibility() {
+  const hidden = [...app.querySelectorAll('[data-vis]')].filter((c) => !c.checked).map((c) => c.dataset.vis);
+  const crit = Boolean(document.getElementById('crithid')?.checked);
+  const r = await fetch('/api/bots', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hidden, crit_hidden: crit }) });
+  if (!r.ok) { const e = document.getElementById('viserr'); if (e) e.textContent = 'Speichern fehlgeschlagen.'; return; }
+  await refresh();
+  setTimeout(refresh, 8000);   // neu eingeblendete Bots: erste Bitget-Abfrage dauert ein paar Sekunden
 }
 
 // Siri-Kurzbefehl: Adresse mit eigenem Lese-Schluessel, Schritte zum Einrichten, Probe
@@ -532,12 +680,12 @@ async function siriPanel(box) {
 // ------------------------------------------------------------------ Zonen (Treppe/Aufzug, nur Anzeige)
 function viewZones() {
   return `${header('Zonen', 'Treppe & Aufzug · Bitget 1h')}
-  <div class="card"><span class="lbl">Jeder Coin ist gerade in einem Bein: langsam (<b>Treppe</b>), mindestens 3× schneller als das Bein davor
+  ${fold('z_info', 'So liest du die Zonen', 'Treppe · Aufzug · FVG-Leiter', `<div class="card"><span class="lbl">Jeder Coin ist gerade in einem Bein: langsam (<b>Treppe</b>), mindestens 3× schneller als das Bein davor
   (<b>Aufzug</b>) oder in der Gegenbewegung nach einem Aufzug (<b>Rückprall</b>). Gemessen in Tagesschwankungen σ.
   Das Band zeigt, wie weit solche Beine 2022–2026 typisch liefen (mittlere Hälfte, Strich = Median).
   <b>FVG-Leiter</b>: die nächsten offenen Fair Value Gaps (1D/4h) in Laufrichtung. Ein Aufzug endet in 41 % der Fälle in einer
   solchen Zone (Zufall 32 %); bricht er durch, fängt ihn die nächste überzufällig oft. Nur Orientierung: als Handelssignal war
-  das 2025–26 nach Kosten nicht profitabel.</span></div>
+  das 2025–26 nach Kosten nicht profitabel.</span></div>`, true)}
   <div id="zonen"><div class="empty">lädt …</div></div>`;
 }
 
@@ -636,7 +784,8 @@ function zoneList(rows) {
 function route() {
   const h = location.hash.replace(/^#/, '') || '/';
   const parts = h.split('/').filter(Boolean);
-  return { name: parts[0] || 'home', arg: parts[1] ? decodeURIComponent(parts[1]) : null };
+  const name = parts[0] === 'server' ? 'system' : parts[0] || 'home';   // alter Link #/server fuehrt zu System
+  return { name, arg: parts[1] ? decodeURIComponent(parts[1]) : null };
 }
 
 async function render() {
@@ -645,33 +794,51 @@ async function render() {
   tabs.hidden = false;
   for (const a of tabs.querySelectorAll('a')) a.classList.toggle('on', a.dataset.tab === (r.name === 'bot' || r.name === 'trade' ? 'home' : r.name));
   const badge = document.getElementById('badge');
-  const crit = state.alerts.filter((a) => a.level !== 'info').length;
+  const crit = liveAlerts().filter((a) => a.level !== 'info').length;
   badge.hidden = !crit; badge.textContent = crit;
 
   const html = r.name === 'bot' ? viewBot(r.arg) : r.name === 'trade' ? viewTrade(r.arg) : r.name === 'alarme' ? viewAlerts()
-    : r.name === 'auswertung' ? viewStats() : r.name === 'server' ? viewServer() : r.name === 'zonen' ? viewZones() : viewHome();
+    : r.name === 'auswertung' ? viewStats() : r.name === 'system' ? viewSystem() : r.name === 'zonen' ? viewZones() : viewHome();
   app.innerHTML = html;
   document.getElementById('reload')?.addEventListener('click', refresh);
-  document.getElementById('tradeback')?.addEventListener('click', (ev) => { if (history.length > 1) { ev.preventDefault(); history.back(); } });
+  // Zurueck: in der App einen Schritt zurueck (dorthin, wo man herkam); direkt geoeffnet -> Uebersicht
+  document.getElementById('back')?.addEventListener('click', (ev) => { if (navCount > 0) { ev.preventDefault(); history.back(); } });
 
   app.querySelectorAll('[data-range]').forEach((b) => b.addEventListener('click', () => { ui.range = b.dataset.range; render(); }));
-  bindGoalForm();
   app.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => { ui.mode = b.dataset.mode; render(); }));
+  app.querySelectorAll('[data-sort]').forEach((b) => b.addEventListener('click', () => { pref.sort = b.dataset.sort; savePref(); render(); }));
+  app.querySelectorAll('[data-atab]').forEach((b) => b.addEventListener('click', () => { pref.atab = b.dataset.atab; savePref(); render(); }));
+  app.querySelectorAll('[data-vis]').forEach((c) => c.addEventListener('change', saveVisibility));
+  document.getElementById('crithid')?.addEventListener('change', saveVisibility);
+  document.getElementById('explain')?.addEventListener('change', (ev) => { pref.explain = ev.target.checked; savePref(); });
+  document.getElementById('foldreset')?.addEventListener('click', () => { pref.fold = {}; savePref(); render(); });
+  document.getElementById('foldall')?.addEventListener('click', () => {
+    const open = [...app.querySelectorAll('[data-fold]')].some((s) => !s.classList.contains('closed'));
+    ALERT_FOLDS.forEach((k) => { pref.fold[k] = open; });
+    savePref(); render();
+  });
+  bindGoalForm();
   const eq = (bot) => api(`/api/equity?bot=${encodeURIComponent(bot)}&range=${ui.range}&mode=${ui.mode}`);
   const ap = document.getElementById('allpos'); if (ap) drawPositions(ap, allPositions(), true);
   const bp = document.getElementById('botpos');
   if (bp) { const bb = state.bots.find((x) => x.name === r.arg); drawPositions(bp, (bb.paper ? bb.paper.positions || [] : bb.positions).map((p) => ({ ...p, bot: bb.name })), false); }
   try {
     if (r.name === 'home') {
+      const ex = document.getElementById('expo'); if (ex) drawExposure(ex, state.bots);
       const [pts, market] = await Promise.all([eq('all'), api('/api/market').catch(() => null)]);
       const el = document.getElementById('homechart'); if (el) { el.innerHTML = chartWithSummary(pts); bindScrub(el, pts); }
       const w = document.getElementById('worst'); if (w) drawWorst(w, allPositions(), market, totals(state.bots).equity);
       const f = document.getElementById('funding'); if (f) drawFunding(f, allPositions(), market);
     } else if (r.name === 'bot') {
-      const [pts, st, trades] = await Promise.all([eq(r.arg), api(`/api/stats?bot=${encodeURIComponent(r.arg)}`), api('/api/trades')]);
+      const b = state.bots.find((x) => x.name === r.arg);
+      if (!b) return;
+      const [pts, st, trades, race, reports] = await Promise.all([eq(r.arg), api(`/api/stats?bot=${encodeURIComponent(r.arg)}`), api('/api/trades'),
+        b.paper ? null : api('/api/race?range=Alles'), b.paper ? [] : api('/api/reports')]);
       const c = document.getElementById('botchart'); if (c) { c.innerHTML = chartWithSummary(pts); bindScrub(c, pts); }
       const t = document.getElementById('bottrades'); if (t) t.innerHTML = tradeRows(st.trades, false);
       const k = document.getElementById('botcoins'); if (k) drawCoins(k, trades, r.arg);
+      const fe = document.getElementById('botfees'); if (fe) drawFees(fe, trades.filter((x) => x.bot === r.arg));
+      const ch = document.getElementById('botchips'); if (ch) drawBotChips(ch, b, trades, race, reports);
     } else if (r.name === 'trade') {
       const box = document.getElementById('tradechart');
       const t = await api(`/api/trade?pid=${encodeURIComponent(r.arg)}`);
@@ -683,27 +850,17 @@ async function render() {
       const el = document.getElementById('zonen'); const z = await api('/api/zones');
       if (el) drawZones(el, z);
       if (z.laedt) setTimeout(() => { if (route().name === 'zonen') render(); }, 15000);
-    } else if (r.name === 'server') {
+    } else if (r.name === 'system') {
+      const pb = document.getElementById('pushbox');
+      if (pb) pushPanel(pb).catch((e) => { pb.innerHTML = `<div class="empty">Mitteilungen nicht verfügbar (${esc(e.message)}).</div>`; });
       const sb = document.getElementById('siribox'); if (sb) await siriPanel(sb);
     } else if (r.name === 'alarme') {
       const tl = document.getElementById('timeline');
-      const pb = document.getElementById('pushbox');
-      if (pb) pushPanel(pb).catch((e) => { pb.innerHTML = `<div class="empty">Mitteilungen nicht verfügbar (${esc(e.message)}).</div>`; });
       const ev = await api('/api/events');
       if (tl) drawTimeline(tl, ev);
     } else if (r.name === 'auswertung') {
-      const [st, trades, race, dd, reports, market] = await Promise.all([api('/api/stats?bot=all'), api('/api/trades'),
-        api('/api/race?range=Alles'), api('/api/equity?bot=all&range=Alles&mode=gewinn'), api('/api/reports'), api('/api/market').catch(() => null)]);
       const el = document.getElementById('statsbody');
-      if (el) {
-        el.innerHTML = statsBody(st);
-        const box = (id) => document.getElementById(id);
-        drawDrawdown(box('vizA'), dd); drawRace(box('vizB'), race); drawCosts(box('vizC'), trades);
-        drawScatter(box('vizD'), trades); drawHeatmap(box('vizE'), trades); drawExposure(box('vizF'), state.bots);
-        drawRecap(box('vizM'), trades, dd); drawReports(box('vizL'), reports); drawCoins(box('vizK'), trades);
-        drawGrades(box('vizS'), state.bots, trades, race, reports); drawVsBtc(box('vizO'), dd, market);
-        drawForecast(box('vizP'), dd, state.goal); drawFees(box('vizU'), trades); drawPhase(box('vizQ'), market, trades);
-      }
+      if (el) await loadStats(el);
     }
   } catch (e) { /* Login-Wechsel oder Netzwerk: naechster Refresh versucht es erneut */ }
 }
@@ -711,9 +868,6 @@ async function render() {
 function bindGoalForm() {
   const form = document.getElementById('goalform');
   if (!form) return;
-  const toggle = (open) => { form.hidden = !open; };
-  document.getElementById('goaledit').addEventListener('click', () => toggle(form.hidden));
-  document.getElementById('goalcancel').addEventListener('click', () => toggle(false));
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const body = { usdt: Number(document.getElementById('g_usdt').value), start: document.getElementById('g_start').value,
@@ -759,13 +913,37 @@ function showLogin() {
   });
 }
 
-window.addEventListener('hashchange', () => { window.scrollTo(0, 0); render(); });
+// Ein Klick-Waechter fuer die ganze App: Abschnitte auf-/zuklappen, i-Erklaerungen, Spruenge mit Vorauswahl
+app.addEventListener('click', (ev) => {
+  const h = ev.target.closest('.foldh');
+  if (h) {
+    const sec = h.closest('[data-fold]');
+    const closed = !sec.classList.contains('closed');
+    sec.classList.toggle('closed', closed);
+    h.setAttribute('aria-expanded', String(!closed));
+    pref.fold[sec.dataset.fold] = closed;
+    savePref();
+    return;
+  }
+  const ib = ev.target.closest('.ibtn');
+  if (ib) {
+    const q = ib.closest('h2')?.nextElementSibling?.querySelector('.q');
+    if (q) q.hidden = !q.hidden;
+    return;
+  }
+  const fo = ev.target.closest('[data-foldopen]');
+  if (fo) { pref.fold[fo.dataset.foldopen] = false; savePref(); }
+  const ag = ev.target.closest('[data-atabgo]');
+  if (ag) { pref.atab = ag.dataset.atabgo; savePref(); }
+});
+
+window.addEventListener('hashchange', () => { navCount++; window.scrollTo(0, 0); render(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
-// Offenes Ziel-Formular, Finger auf der Kurve oder eben angetippte Auswahl nicht durch den Auto-Refresh wegwischen
+// Eingabe im Ziel-Formular, Finger auf der Kurve oder eben angetippte Auswahl nicht durch den Auto-Refresh wegwischen
 let lastTouch = 0;
 document.addEventListener('pointerdown', () => { lastTouch = Date.now(); });
 setInterval(() => {
-  if (document.hidden || scrubbing || Date.now() - lastTouch < 45000 || document.querySelector('#goalform:not([hidden])')) return;
+  if (document.hidden || scrubbing || Date.now() - lastTouch < 45000 || document.activeElement?.closest?.('#goalform')) return;
   if (route().name === 'trade') return;
   refresh();
 }, 30000);

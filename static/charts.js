@@ -534,20 +534,17 @@ function drawTradeChart(box, t, data) {
 }
 
 // ------------------------------------------------------------------ L: Live gegen Backtest (Ergebnis der Bot-eigenen Checks)
-function drawReports(box, reports) {
-  const label = { green: ['g', 'passt', 'up'], yellow: ['y', 'auffällig', 'warn'], red: ['r', 'weicht ab', 'down'] };
-  box.innerHTML = reports.map((r) => {
-    const age = r.ts ? (Date.now() / 1000 - r.ts) / 3600 : null;
-    const stale = age != null && age > 36;
-    const [lamp, txt, col] = !r.status ? ['n', 'noch kein Bericht', 'muted'] : stale ? ['n', 'veraltet', 'muted'] : label[r.status] || ['n', '?', 'muted'];
-    const det = !r.status ? 'Der Bot hat noch keine Ergebnisdatei geschrieben. Sie entsteht beim nächsten täglichen Check (ab 08:00 UTC).'
-      : `Gleiche Einstiege <b>${r.same}/${r.sim_n}</b> · fehlt live <b>${r.missing}</b> · nur live <b>${r.extra}</b> · Ausstieg abweichend <b>${r.exit_dev}</b><br>
-         Live <b class="${cls(r.live_pnl)}">${signed(r.live_pnl)}</b> · Simulator <b class="${cls(r.sim_pnl)}">${signed(r.sim_pnl)}</b> USDT · letzte ${r.days} Tage<br>
-         ${(r.flags || []).length ? `Hinweise: ${r.flags.map(esc).join(' · ')}<br>` : ''}
-         Stand ${timeStr(r.ts * 1000)}${stale ? ' (älter als 36 h)' : ''}${r.html ? ` · <a href="/api/report?bot=${encodeURIComponent(r.bot)}" target="_blank" rel="noopener">Bericht öffnen</a>` : ''}`;
-    return `<details class="ampel"><summary><span class="lamp ${lamp}"></span><b>${esc(r.bot)}</b><span class="${col}">${txt}</span>
-      <span class="muted mono" style="font-size:11px">${r.status ? `${r.same}/${r.sim_n}` : ''}</span></summary><div class="det">${det}</div></details>`;
-  }).join('') + '<div class="lbl">Grün: alle Einstiege gleich. Gelb: Einstiege gleich, aber Ausstieg weicht ab oder es gibt Hinweise. Rot: Einstiege fehlen live oder gibt es nur live. Quelle: der tägliche Check jedes Bots.</div>';
+// Lampe, Kurztext und Einzelheiten eines Berichts -- fuer das Zeugnis und den Kopf der Bot-Seite
+function reportInfo(r) {
+  const label = { green: ['g', 'Live = Backtest'], yellow: ['y', 'Live ≈ Backtest'], red: ['r', 'Live ≠ Backtest'] };
+  const stale = r.ts && (Date.now() / 1000 - r.ts) / 3600 > 36;
+  const [lamp, short] = !r.status ? ['n', 'kein Live-Bericht'] : stale ? ['n', 'Live-Bericht veraltet'] : label[r.status] || ['n', '?'];
+  const det = !r.status ? 'Der Bot hat noch keine Ergebnisdatei geschrieben. Sie entsteht beim nächsten täglichen Check (ab 08:00 UTC).'
+    : `Gleiche Einstiege <b>${r.same}/${r.sim_n}</b> · fehlt live <b>${r.missing}</b> · nur live <b>${r.extra}</b> · Ausstieg abweichend <b>${r.exit_dev}</b><br>
+       Live <b class="${cls(r.live_pnl)}">${signed(r.live_pnl)}</b> · Simulator <b class="${cls(r.sim_pnl)}">${signed(r.sim_pnl)}</b> USDT · letzte ${r.days} Tage<br>
+       ${(r.flags || []).length ? `Hinweise: ${r.flags.map(esc).join(' · ')}<br>` : ''}
+       Stand ${timeStr(r.ts * 1000)}${stale ? ' (älter als 36 h)' : ''}${r.html ? ` · <a href="/api/report?bot=${encodeURIComponent(r.bot)}" target="_blank" rel="noopener">Bericht öffnen</a>` : ''}`;
+  return { lamp, short, det };
 }
 
 // ------------------------------------------------------------------ Offene Positionen als kompakte Liste (Übersicht: alle Bots, Bot-Seite: ein Bot)
@@ -825,9 +822,9 @@ function drawPhase(box, market, trades) {
 
 // ------------------------------------------------------------------ S: Bot-Zeugnis
 const gradeOpen = new Set();
-function drawGrades(box, bots, trades, race, reports) {
+function gradeItems(bots, trades, race, reports) {
   const now = Date.now(), since = now - 30 * 864e5;
-  const items = bots.filter((b) => b.has_key).map((b) => {
+  return bots.filter((b) => b.has_key).map((b) => {
     const rep = reports.find((r) => r.bot === b.name) || {};
     const t30 = trades.filter((t) => t.bot === b.name && t.utime >= since);
     const net = t30.reduce((s, t) => s + t.net, 0), gross = t30.reduce((s, t) => s + (t.pnl || 0), 0), fees = t30.reduce((s, t) => s + (t.fees || 0), 0);
@@ -848,21 +845,31 @@ function drawGrades(box, bots, trades, race, reports) {
     ];
     const pen = Math.min(20, alerts * 10), pts = Math.max(0, c.reduce((s, x) => s + x[1], 0) - pen);
     const grade = pts >= 85 ? 'A' : pts >= 70 ? 'B' : pts >= 50 ? 'C' : pts >= 30 ? 'D' : 'E';
-    return { b, c, pts, grade, pen, alerts };
+    return { b, c, pts, grade, pen, alerts, rep };
   }).sort((a, b) => b.pts - a.pts);
+}
+
+// Zeugnis und Live gegen Backtest in einer Tabelle: Lampe je Bot, aufgeklappt Begruendung + Bericht des Bots
+function drawGrades(box, bots, trades, race, reports) {
+  const items = gradeItems(bots, trades, race, reports);
   if (!items.length) return tooFew(box, 'Keine Bots mit Schlüssel.');
   const gcol = { A: '--up', B: '--up', C: '--warn', D: '--down', E: '--down' };
-  box.innerHTML = items.map(({ b, c, pts, grade, pen, alerts }) => {
-    const open = gradeOpen.has(b.name);
+  box.innerHTML = items.map(({ b, c, pts, grade, pen, alerts, rep }) => {
+    const open = gradeOpen.has(b.name), ri = reportInfo(rep);
     const chip = (x) => `<span class="${x[1] >= 16 ? 'ok' : x[1] >= 8 ? 'mid' : 'bad'}">${esc(x[2])}</span>`;
     return `<div class="grade" role="button" tabindex="0" data-bot="${esc(b.name)}" aria-expanded="${open}">
       <span class="gl" style="color:var(${gcol[grade]});background:color-mix(in srgb, var(${gcol[grade]}) 16%, transparent)">${grade}</span>
-      <div><b style="color:${botColor(b.name)}">${esc(b.name)}</b><div class="lbl mono">${pts} / 100</div></div>
+      <div><b style="color:${botColor(b.name)}">${esc(b.name)}</b><div class="lbl mono"><span class="lamp ${ri.lamp}" title="${esc(ri.short)}"></span>${pts} / 100</div></div>
       <div class="gchips">${c.map(chip).join('')}${pen ? `<span class="bad">${alerts} Alarm${alerts > 1 ? 'e' : ''}</span>` : ''}</div><span class="muted">${open ? '▾' : '›'}</span>
-      ${open ? `<div class="gdet">${c.map((x) => `<div><b class="mono">${x[1]}/20</b> ${esc(x[0])}: ${esc(x[3])}</div>`).join('')}${pen ? `<div><b class="mono">−${pen}</b> Abzug für ${alerts} offene Alarme (z. B. Position ohne SL, Order ohne Position).</div>` : ''}</div>` : ''}</div>`;
-  }).join('') + '<div class="lbl">Je Kriterium bis 20 Punkte. A ab 85, B ab 70, C ab 50, D ab 30.</div>';
+      ${open ? `<div class="gdet">${c.map((x) => `<div><b class="mono">${x[1]}/20</b> ${esc(x[0])}: ${esc(x[3])}</div>`).join('')}${pen ? `<div><b class="mono">−${pen}</b> Abzug für ${alerts} offene Alarme (z. B. Position ohne SL, Order ohne Position).</div>` : ''}
+        <div class="gsub"><span class="lamp ${ri.lamp}"></span>${esc(ri.short)} – täglicher Check des Bots</div><div>${ri.det}</div></div>` : ''}</div>`;
+  }).join('') + `<div class="lbl">Je Kriterium bis 20 Punkte. A ab 85, B ab 70, C ab 50, D ab 30. Lampe = Live gegen Backtest:
+    grün alle Einstiege gleich, gelb Einstiege gleich aber Ausstieg weicht ab oder Hinweise, rot Einstiege fehlen live oder gibt es nur live.</div>`;
   box.querySelectorAll('.grade').forEach((g) => {
-    const t = () => { const n = g.dataset.bot; gradeOpen.has(n) ? gradeOpen.delete(n) : gradeOpen.add(n); drawGrades(box, bots, trades, race, reports); };
+    const t = (e) => {
+      if (e && e.target.closest('a')) return;   // "Bericht öffnen" soll nicht zuklappen
+      const n = g.dataset.bot; gradeOpen.has(n) ? gradeOpen.delete(n) : gradeOpen.add(n); drawGrades(box, bots, trades, race, reports);
+    };
     g.addEventListener('click', t);
     g.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); t(); } });
   });

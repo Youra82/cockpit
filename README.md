@@ -43,6 +43,8 @@ Nein.
 
 Die API-Schlüssel kommen aus der `secret.json` des jeweiligen Bots. Nutzen zwei Bots denselben Schlüssel, erkennt das Cockpit das und zählt das Konto nur einmal.
 
+**Bots erkennen und ein-/ausblenden:** Das Cockpit findet jeden Bot-Ordner neben sich, der eine `secret.json` hat (alle 10 Minuten neu, also auch frisch installierte Bots), dazu Papierkonten wie evobot. Unter **System → Bots im Cockpit** schaltest du jeden Bot an oder aus. Ein ausgeblendeter Bot zählt nirgends mit: nicht im Gesamtkapital, nicht bei Positionen und Alarmen, nicht in der Auswertung. Er wird auch nicht bei Bitget abgefragt, außer du schaltest „Kritische Alarme ausgeblendeter Bots trotzdem melden“ ein. Neu gefundene Bots starten ausgeblendet. Gespeichert wird das in `data/bots.json`. Beim ersten Start sind die Bots aus `config.json` (und evobot) angezeigt, alle anderen ausgeblendet.
+
 ## Installation auf dem VPS
 
 Das Cockpit gehört in **denselben Ordner wie die Bots**, zum Beispiel `/root/cockpit` neben `/root/ltbbot`.
@@ -81,7 +83,7 @@ Auf dem iPhone:
 Das Cockpit kann sich von selbst melden, auch wenn die App zu ist (iOS 16.4 oder neuer).
 
 1. Cockpit **vom Home-Bildschirm** öffnen (in Safari selbst geht es nicht).
-2. Seite **Alarme** → **Mitteilungen einschalten** → erlauben.
+2. Seite **System** → **Mitteilungen** → **Mitteilungen einschalten** → erlauben.
 3. **Test senden** antippen. Die Mitteilung kommt nach wenigen Sekunden.
 
 Arten, einzeln abschaltbar: Bot läuft nicht, Position ohne Stop-Loss, Liquidation/Liquidationsgefahr, Klumpenrisiko, Bitget-Fehler (aus), große Trades (ab `push_big_trade_usdt`), Tagesabschluss (ab `push_daily_hour` Uhr), Monatsrückblick am 1.
@@ -105,9 +107,9 @@ cd ~/cockpit && bash update.sh
 | Schlüssel | Bedeutung |
 |---|---|
 | `password` | App-Passwort (Pflicht) |
-| `bots` | aktive Bots mit `cycle_minutes`. Wird ein Bot länger als 3 Zyklen (mindestens 20 min) nicht ausgeführt, gilt er als „läuft nicht“ |
+| `bots` | Bots mit `cycle_minutes` (bestimmen die feste Reihenfolge und den Takt). Wird ein Bot länger als 3 Zyklen (mindestens 20 min) nicht ausgeführt, gilt er als „läuft nicht“. Weitere Bot-Ordner findet das Cockpit selbst, siehe oben |
 | `bots_dir` | Ordner, in dem die Bots liegen (Standard: eine Ebene über dem Cockpit) |
-| `goal_usdt`, `goal_start_date`, `goal_date` | Startwerte für den Ziel-Balken auf der Seite Auswertung. In der App über **Ändern** anpassbar, das wird in `data/goal.json` gespeichert und hat Vorrang |
+| `goal_usdt`, `goal_start_date`, `goal_date` | Startwerte für den Ziel-Balken auf der Seite Auswertung. In der App unter **System → Ziel** anpassbar, das wird in `data/goal.json` gespeichert und hat Vorrang |
 | `poll_seconds`, `poll_offset_seconds` | Abfragetakt (Standard: 60 s, auf Sekunde 30) |
 | `push_big_trade_usdt` | ab diesem Betrag (Gewinn oder Verlust) gibt es eine Mitteilung „großer Trade“ (Standard 5) |
 | `push_daily_hour` | Uhrzeit des Tagesabschlusses (Standard 21) |

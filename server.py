@@ -36,7 +36,10 @@ DATA = os.path.join(BASE, 'data')
 CONFIG_PATH = os.path.join(BASE, 'config.json')
 DB_PATH = os.path.join(DATA, 'cockpit.db')
 GOAL_PATH = os.path.join(DATA, 'goal.json')
+BOTS_PATH = os.path.join(DATA, 'bots.json')
 PRODUCT = 'USDT-FUTURES'
+# Alarme, die bei ausgeblendeten Bots trotzdem gemeldet werden (falls in der App eingeschaltet)
+CRIT_HIDDEN = {'Position ohne Stop-Loss', 'Liquidation vor Stop-Loss', 'Nahe an der Liquidation', 'Liquidation'}
 
 DEFAULTS = {
     'host': '127.0.0.1',
@@ -134,15 +137,26 @@ def load_account(bot_path, name):
 
 
 def discover_bots(cfg):
+    """Alle Bots: die aus config.json (Reihenfolge bleibt) plus jeder weitere Ordner neben dem Cockpit mit
+    secret.json plus Papierkonten. Welche davon angezeigt werden, steht in data/bots.json."""
     root = os.path.abspath(os.path.join(BASE, cfg['bots_dir']))
-    if cfg['bots'] == 'auto':
-        entries = [{'name': d, 'path': os.path.join(root, d)} for d in sorted(os.listdir(root))
-                   if d not in cfg['exclude'] and os.path.isfile(os.path.join(root, d, 'secret.json'))]
-    else:
-        entries = [b if isinstance(b, dict) else {'name': b} for b in cfg['bots']]
-        for e in entries:
-            e.setdefault('path', os.path.join(root, e['name']))
-    if not any(e.get('name') == 'evobot' for e in entries) and os.path.isfile(os.path.join(root, 'evobot', 'data', 'arten', 'konto.json')):
+    listed = [] if cfg['bots'] == 'auto' else [dict(b) if isinstance(b, dict) else {'name': b} for b in cfg['bots']]
+    found = {e['name']: e for e in listed}
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        names = []
+    for d in names:
+        if d not in found and d not in cfg['exclude'] and not d.startswith('.') \
+                and os.path.isfile(os.path.join(root, d, 'secret.json')):
+            found[d] = {'name': d}
+    entries = list(found.values())
+    for e in entries:
+        e.setdefault('path', os.path.join(root, e['name']))
+    # evobot mit Papierkonto (konto.json) bleibt Papierkonto, auch wenn sein Ordner eine secret.json hat --
+    # nur ein ausdrücklicher Eintrag in config.json macht ihn zum Bitget-Konto
+    if not any(e.get('name') == 'evobot' for e in listed) and os.path.isfile(os.path.join(root, 'evobot', 'data', 'arten', 'konto.json')):
+        entries = [e for e in entries if e['name'] != 'evobot']
         entries.append({'name': 'evobot', 'path': os.path.join(root, 'evobot'), 'paper': 'evobot/data/arten/konto.json'})
     bots = []
     for e in entries:
@@ -155,6 +169,32 @@ def discover_bots(cfg):
         cycle = e.get('cycle_minutes') or cfg['cycle_minutes'].get(e['name']) or cfg['default_cycle_minutes']
         bots.append({'name': e['name'], 'path': e['path'], 'account': acc, 'fp': fp, 'cycle': cycle})
     return bots
+
+
+def load_visibility(cfg, names):
+    """Welche Bots angezeigt werden (data/bots.json). Beim ersten Start: wie bisher die Bots aus config.json
+    (plus Papierkonto evobot); alle weiteren gefundenen Ordner starten ausgeblendet."""
+    try:
+        with open(BOTS_PATH, encoding='utf-8') as f:
+            v = json.load(f)
+        return {'hidden': set(v.get('hidden') or []), 'known': set(v.get('known') or []),
+                'crit_hidden': bool(v.get('crit_hidden', False))}
+    except (OSError, ValueError, AttributeError):
+        pass
+    if cfg['bots'] == 'auto':
+        shown = set(names)
+    else:
+        shown = {b['name'] if isinstance(b, dict) else b for b in cfg['bots']} | {'evobot'}
+    v = {'hidden': {n for n in names if n not in shown}, 'known': set(names), 'crit_hidden': False}
+    save_visibility(v)
+    return v
+
+
+def save_visibility(v):
+    tmp = BOTS_PATH + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump({'hidden': sorted(v['hidden']), 'known': sorted(v['known']), 'crit_hidden': v['crit_hidden']}, f, indent=1)
+    os.replace(tmp, BOTS_PATH)
 
 
 def _leiter_summary(st):
@@ -639,7 +679,11 @@ def norm_close(c):
 class Poller(threading.Thread):
     def __init__(self, cfg, bots, store):
         super().__init__(daemon=True)
-        self.cfg, self.bots, self.store = cfg, bots, store
+        self.cfg, self.all_bots, self.store = cfg, bots, store
+        self.vis = load_visibility(cfg, [b['name'] for b in bots])
+        self.scan_ts = time.time()
+        self.wake = threading.Event()
+        self.build_lock = threading.Lock()
         self.lock = threading.Lock()
         self.accounts = {}  # fp -> {client, data, error, ts, last_history}
         self.git = {}
@@ -648,6 +692,30 @@ class Poller(threading.Thread):
         self.markets_client = None
         self.pusher = None
         self.seen_alerts, self.reported_alerts = set(), None
+
+    def is_hidden(self, name):
+        """Ausgeblendet: in der App abgeschaltet oder neu gefunden und noch nie bestätigt."""
+        return name in self.vis['hidden'] or name not in self.vis['known']
+
+    @property
+    def bots(self):
+        """Angezeigte Bots -- nur sie zählen in Übersicht, Alarmen und Auswertung."""
+        return [b for b in self.all_bots if not self.is_hidden(b['name'])]
+
+    def polled(self):
+        """Abgefragt werden die angezeigten Bots; ausgeblendete mit Schlüssel nur, wenn deren kritische
+        Alarme trotzdem gemeldet werden sollen."""
+        return [b for b in self.all_bots if not self.is_hidden(b['name']) or (self.vis['crit_hidden'] and b['fp'])]
+
+    def set_visibility(self, hidden, crit_hidden):
+        names = {b['name'] for b in self.all_bots}
+        self.vis = {'hidden': {h for h in hidden if h in names} | (self.vis['hidden'] - names),
+                    'known': self.vis['known'] | names, 'crit_hidden': bool(crit_hidden)}
+        save_visibility(self.vis)
+        self.git_ts = 0     # Version neu eingeblendeter Bots in der nächsten Runde holen
+        log.info('Anzeige geändert: ausgeblendet %s', ', '.join(sorted(self.vis['hidden'] & names)) or '-')
+        self.build_state(pushes=False)
+        self.wake.set()     # neu eingeblendete Bots sofort abfragen
 
     def client_for(self, fp, acc):
         a = self.accounts.setdefault(fp, {'client': None, 'data': None, 'error': None, 'ts': None,
@@ -692,7 +760,7 @@ class Poller(threading.Thread):
             a['last_history'] = time.time()
 
     def bot_name(self, fp):
-        return next((b['name'] for b in self.bots if b['fp'] == fp), '?')
+        return next((b['name'] for b in self.all_bots if b['fp'] == fp), '?')
 
     def position_events(self, fp, old, new):
         """Zeitleiste: neue Position und verschobener Stop-Loss (Vergleich mit der Vorrunde)."""
@@ -721,7 +789,7 @@ class Poller(threading.Thread):
                 self.pusher.send('big_trade', f"{self.bot_name(fp)}: {c['symbol'].split('/')[0]} {c['side']} geschlossen",
                                  f"{c['net']:+.2f} USDT nach {dur}".replace('.', ',', 1), '#/auswertung')
 
-    def alert_pushes(self, alerts, bots, now):
+    def alert_pushes(self, alerts, pairs, now):
         """Neue Alarme melden -- erst wenn sie zwei Runden hintereinander bestehen (kurze Luecke zwischen
         Einstieg und SL-Order soll keine Mitteilung ausloesen)."""
         def cat(a):
@@ -745,9 +813,9 @@ class Poller(threading.Thread):
             self.pusher.meta('reported', sorted(reported))
         self.reported_alerts = reported
         self.seen_alerts = set(keys)
-        self.summary_pushes(bots, now)
+        self.summary_pushes(pairs, now)
 
-    def summary_pushes(self, bots, now):
+    def summary_pushes(self, pairs, now):
         """Tagesabschluss ab push_daily_hour, Monatsrueckblick am 1. -- je einmal."""
         if not self.pusher or not self.pusher.public_key:
             return
@@ -757,7 +825,7 @@ class Poller(threading.Thread):
             return
         today = loc.strftime('%Y-%m-%d')
         counted, real, opn, n = set(), 0.0, 0.0, 0
-        for b, item in zip(self.bots, bots):
+        for b, item in pairs:
             if not b['fp'] or b['fp'] in counted:
                 continue
             counted.add(b['fp'])
@@ -786,8 +854,14 @@ class Poller(threading.Thread):
                                  '#/auswertung')
 
     def poll_once(self):
+        if time.time() - self.scan_ts > 600:   # neu installierte Bots finden
+            try:
+                self.all_bots = discover_bots(self.cfg)
+            except Exception:
+                log.exception('Bot-Suche fehlgeschlagen')
+            self.scan_ts = time.time()
         seen = set()
-        for b in self.bots:
+        for b in self.polled():
             if b.get('paper'):
                 a = self.accounts.setdefault(b['pfp'], {'data': None, 'ts': None})
                 try:
@@ -811,23 +885,29 @@ class Poller(threading.Thread):
             except Exception as e:
                 a = self.accounts.setdefault(b['fp'], {'client': None, 'data': None, 'ts': None, 'last_history': 0})
                 a['error'] = f'{type(e).__name__}: {str(e)[:160]}'
-                log.warning('%s: Abfrage fehlgeschlagen: %s', b['name'], a['error'])
+                (log.debug if self.is_hidden(b['name']) else log.warning)('%s: Abfrage fehlgeschlagen: %s', b['name'], a['error'])
         if time.time() - self.git_ts > 600:
             self.git = {b['name']: git_info(b['path']) for b in self.bots}
             self.git_ts = time.time()
         self.build_state()
 
-    def build_state(self):
+    def build_state(self, pushes=True):
+        with self.build_lock:
+            self._build_state(pushes)
+
+    def _build_state(self, pushes):
         cfg, now = self.cfg, time.time()
         tz = timezone(timedelta(hours=cfg['timezone_offset_hours']))
         day_start = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
         day_start_ms = int(day_start.timestamp() * 1000)
+        src = self.polled()
+        hidden = {b['name'] for b in src if self.is_hidden(b['name'])}
         by_fp = {}
-        for b in self.bots:
+        for b in src:
             by_fp.setdefault(b['fp'], []).append(b['name'])
 
         bots, alerts = [], []
-        for b in self.bots:
+        for b in src:
             if b.get('paper'):
                 a = self.accounts.get(b['pfp']) or {}
                 ps = a.get('paper') or {}
@@ -896,7 +976,7 @@ class Poller(threading.Thread):
 
         # Verwaiste Schliess-Orders: SL/TP/Trailing fuer eine Position, die es nicht mehr gibt
         seen_fp = set()
-        for b, item in zip(self.bots, bots):
+        for b, item in zip(src, bots):
             if not b['fp'] or b['fp'] in seen_fp:
                 continue
             seen_fp.add(b['fp'])
@@ -917,8 +997,8 @@ class Poller(threading.Thread):
         # Klumpenrisiko: gleicher Coin, gleiche Richtung, mehrere Konten
         groups = {}
         seen_fp = set()
-        for b, item in zip(self.bots, bots):
-            if b['fp'] in seen_fp:
+        for b, item in zip(src, bots):
+            if b['fp'] in seen_fp or b['name'] in hidden:
                 continue
             seen_fp.add(b['fp'])
             for p in item['positions']:
@@ -932,14 +1012,31 @@ class Poller(threading.Thread):
                                'text': f'{", ".join(m for m, _ in members)} sind gleichzeitig {coin} {side} '
                                        f'· zusammen {total:,.0f} USDT', 'ts': now})
 
+        # Ausgeblendete Bots: zählen nirgends mit; nur ihre gefährlichen Alarme bleiben (falls eingeschaltet), markiert
+        alerts = [a if a['bot'] not in hidden else {**a, 'hidden': True} for a in alerts
+                  if a['bot'] not in hidden or a['title'] in CRIT_HIDDEN]
+        pairs = [(b, item) for b, item in zip(src, bots) if b['name'] not in hidden]
+        items = {item['name']: item for item in bots}
+        detected = []
+        for b in self.all_bots:
+            item = items.get(b['name'])
+            act = item['last_activity'] if item else (None if b.get('paper') else last_activity(b['path']))
+            running = item['running'] if item else act is not None and now - act < max(20, b['cycle'] * 3) * 60
+            detected.append({'name': b['name'], 'shown': not self.is_hidden(b['name']),
+                             'new': b['name'] not in self.vis['known'], 'paper': bool(b.get('paper')),
+                             'has_key': bool(b['fp']), 'running': running, 'last_activity': act,
+                             'equity': item['equity'] if item else None})
+
         order = {'crit': 0, 'warn': 1, 'info': 2}
         alerts.sort(key=lambda x: (order[x['level']], -(x['ts'] or 0)))
-        try:
-            self.alert_pushes(alerts, bots, now)
-        except Exception:
-            log.exception('Mitteilungen/Zeitleiste fehlgeschlagen')
+        if pushes:
+            try:
+                self.alert_pushes(alerts, pairs, now)
+            except Exception:
+                log.exception('Mitteilungen/Zeitleiste fehlgeschlagen')
         with self.lock:
-            self.state = {'updated': now, 'bots': bots, 'alerts': alerts, 'clusters': clusters,
+            self.state = {'updated': now, 'bots': [item for _, item in pairs], 'alerts': alerts, 'clusters': clusters,
+                          'detected': detected, 'crit_hidden': self.vis['crit_hidden'],
                           'server': server_info(),
                           'goal': load_goal(cfg),
                           'poll_seconds': cfg['poll_seconds']}
@@ -957,14 +1054,15 @@ class Poller(threading.Thread):
                 log.exception('Abfragerunde fehlgeschlagen')
             now = time.time()
             nxt = ((now - offset) // period + 1) * period + offset
-            time.sleep(max(1.0, nxt - now))
+            self.wake.wait(max(1.0, nxt - now))
+            self.wake.clear()
 
 
 # --------------------------------------------------------------------------- HTTP
 
 class App:
-    def __init__(self, cfg, bots, store, poller):
-        self.cfg, self.bots, self.store, self.poller = cfg, bots, store, poller
+    def __init__(self, cfg, store, poller):
+        self.cfg, self.store, self.poller = cfg, store, poller
         key_path = os.path.join(DATA, 'session_key')
         if not os.path.isfile(key_path):
             with open(key_path, 'w') as f:
@@ -981,6 +1079,11 @@ class App:
                 f.write(secrets.token_urlsafe(18))
         with open(sk) as f:
             self.siri_key = f.read().strip()
+
+    @property
+    def bots(self):
+        """Nur angezeigte Bots: Kurven, Trades, Rennen und Statistik rechnen ohne ausgeblendete."""
+        return self.poller.bots
 
     def fps_for(self, bot):
         if bot in (None, '', 'all'):
@@ -1024,7 +1127,8 @@ class App:
     def events(self, days=7):
         """Zeitleiste: gespeicherte Ereignisse + geschlossene Trades + Ein-/Auszahlungen, neueste zuerst."""
         since = time.time() - days * 86400
-        out = [dict(e) for e in self.store.events(since)]
+        shown = {b['name'] for b in self.bots}
+        out = [dict(e) for e in self.store.events(since) if not e['bot'] or e['bot'] in shown]
         for t in self.trades():
             if t['utime'] / 1000 >= since:
                 mins = max(1, (t['utime'] - t['ctime']) / 60000)
@@ -1234,7 +1338,9 @@ class App:
             opn += b['upnl'] or 0
         de = lambda v, d=2: f'{v:.{d}f}'.replace('.', ',')
         sgn = lambda v: ('plus ' if v >= 0 else 'minus ') + de(abs(v))
-        crit = [a for a in st['alerts'] if a['level'] == 'crit']
+        alerts = [a for a in st['alerts'] if not a.get('hidden')]
+        st = {**st, 'alerts': alerts}
+        crit = [a for a in alerts if a['level'] == 'crit']
         txt = (f"Gesamtkapital {de(eq, 0)} USDT. Heute realisiert {sgn(real)}, offen {sgn(opn)}. "
                f"{running} von {len(st['bots'])} Bots laufen. ")
         if not st['alerts']:
@@ -1419,6 +1525,8 @@ def make_handler(app):
             path = urlparse(self.path).path
             if path == '/api/goal':
                 return self.post_goal()
+            if path == '/api/bots':
+                return self.post_bots()
             if path.startswith('/api/push/'):
                 return self.post_push(path)
             if path != '/api/login':
@@ -1453,6 +1561,20 @@ def make_handler(app):
             log.info('Ziel geändert: %s', goal)
             self.send_json(goal)
 
+        def post_bots(self):
+            """Welche Bots angezeigt werden (nur Anzeige im Cockpit, an den Bots ändert sich nichts)."""
+            if not self.authed():
+                return self.send_json({'error': 'login'}, 401)
+            try:
+                body = self.read_json()
+                hidden = body['hidden']
+                if not isinstance(hidden, list) or len(hidden) > 500:
+                    raise ValueError
+                app.poller.set_visibility([str(h) for h in hidden], bool(body.get('crit_hidden', False)))
+            except (ValueError, KeyError, TypeError, AttributeError):
+                return self.send_json({'error': 'ungültig'}, 400)
+            self.send_json({'ok': True})
+
     return Handler
 
 
@@ -1460,15 +1582,16 @@ def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     cfg = load_config()
     bots = discover_bots(cfg)
-    log.info('Bots: %s', ', '.join(f"{b['name']}{'' if b['fp'] else ' (ohne Schlüssel)'}" for b in bots))
     store = Store(DB_PATH)
     with open(os.path.join(DATA, 'server.pid'), 'w') as f:
         f.write(str(os.getpid()))
     poller = Poller(cfg, bots, store)
+    log.info('Bots: %s', ', '.join(f"{b['name']}{'' if b['fp'] or b.get('paper') else ' (ohne Schlüssel)'}"
+                                   f"{' (ausgeblendet)' if poller.is_hidden(b['name']) else ''}" for b in bots))
     poller.pusher = push.Pusher(DATA, cfg['push_contact'])
     poller.build_state()
     poller.start()
-    app = App(cfg, bots, store, poller)
+    app = App(cfg, store, poller)
     httpd = ThreadingHTTPServer((cfg['host'], cfg['port']), make_handler(app))
     log.info('Bot-Cockpit läuft auf http://%s:%s', cfg['host'], cfg['port'])
     httpd.serve_forever()
