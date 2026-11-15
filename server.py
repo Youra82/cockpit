@@ -139,6 +139,47 @@ def load_account(bot_path, name):
     return accounts[0]
 
 
+# Bots mit Schalter Papier/Echtgeld in ihrer settings.json ("echtgeld": {"aktiv": true|false}). Das Cockpit liest den
+# Schalter bei jeder Abfrage: Papier -> Papierkonto-Datei (mit Live-Kursen), Echtgeld -> Bitget-Konto mit dem Schlüssel
+# des Bots. Fehlt der Eintrag: evobot Papier (wie der Bot), jaegerbot/zockerbot Echtgeld (bisheriger Betrieb).
+SWITCH_BOTS = {
+    'evobot': {'paper': os.path.join('data', 'arten', 'konto.json'), 'format': 'evo', 'cycle': 60, 'default_live': False,
+               'live_activity': os.path.join('data', 'arten_live', 'konto.json'), 'ohne_sl': True},
+    'jaegerbot': {'paper': os.path.join('artifacts', 'papier', 'konto.json'), 'format': 'std', 'cycle': 15,
+                  'default_live': True, 'ohne_sl': False},
+    'zockerbot': {'paper': os.path.join('data_papier', 'konto.json'), 'format': 'std', 'cycle': 15,
+                  'default_live': True, 'ohne_sl': True},
+}
+
+
+def bot_papier(path, sw):
+    """True = Papiermodus laut <bot>/settings.json. Unlesbar -> Voreinstellung des Bots."""
+    try:
+        with open(os.path.join(path, 'settings.json'), encoding='utf-8-sig') as f:
+            s = json.load(f)
+    except (OSError, ValueError):
+        return not sw['default_live']
+    return not bool((s.get('echtgeld') or {}).get('aktiv', sw['default_live']))
+
+
+def apply_mode(b):
+    """Schalter eines Bots anwenden: im Papiermodus zählt er wie ein Papierkonto (kein Bitget-Schlüssel, kein
+    Gesamtkapital), im Echtgeldmodus wie jeder andere Bot mit Bitget-Konto."""
+    sw = SWITCH_BOTS.get(b['name'])
+    if not sw:
+        return
+    papier = bot_papier(b['path'], sw)
+    b['modus'] = 'papier' if papier else 'echtgeld'
+    b['ohne_sl'] = sw['ohne_sl']
+    if papier:
+        b.update(paper=os.path.join(b['path'], sw['paper']), paper_format=sw['format'], pfp='paper:' + b['name'],
+                 fp=None, account=None)
+    else:
+        b.update(paper=None, fp=b.get('fp_live'), account=b.get('account_live'))
+        if sw.get('live_activity'):
+            b['activity_file'] = os.path.join(b['path'], sw['live_activity'])
+
+
 def discover_bots(cfg):
     """Alle Bots: die aus config.json (Reihenfolge bleibt) plus jeder weitere Ordner neben dem Cockpit mit
     secret.json plus Papierkonten. Welche davon angezeigt werden, steht in data/bots.json."""
@@ -151,26 +192,23 @@ def discover_bots(cfg):
         names = []
     for d in names:
         if d not in found and d not in cfg['exclude'] and not d.startswith('.') \
-                and os.path.isfile(os.path.join(root, d, 'secret.json')):
-            found[d] = {'name': d}
+                and (os.path.isfile(os.path.join(root, d, 'secret.json'))
+                     or (d in SWITCH_BOTS and os.path.isfile(os.path.join(root, d, 'settings.json')))):
+            found[d] = {'name': d}                # Bots mit Schalter auch ohne secret.json (reiner Papierbetrieb)
     entries = list(found.values())
     for e in entries:
         e.setdefault('path', os.path.join(root, e['name']))
-    # evobot mit Papierkonto (konto.json) bleibt Papierkonto, auch wenn sein Ordner eine secret.json hat --
-    # nur ein ausdrücklicher Eintrag in config.json macht ihn zum Bitget-Konto
-    if not any(e.get('name') == 'evobot' for e in listed) and os.path.isfile(os.path.join(root, 'evobot', 'data', 'arten', 'konto.json')):
-        entries = [e for e in entries if e['name'] != 'evobot']
-        entries.append({'name': 'evobot', 'path': os.path.join(root, 'evobot'), 'paper': 'evobot/data/arten/konto.json'})
     bots = []
     for e in entries:
-        if e.get('paper'):                       # Papierkonto (z. B. evobot): Datei statt Bitget-Schlüssel
-            bots.append({'name': e['name'], 'path': e['path'], 'account': None, 'fp': None, 'pfp': 'paper:' + e['name'],
-                         'paper': os.path.join(root, e['paper']), 'cycle': e.get('cycle_minutes') or 60})
-            continue
-        acc = load_account(e['path'], e['name'])
+        acc = load_account(e['path'], e['name']) if os.path.isfile(os.path.join(e['path'], 'secret.json')) else None
         fp = hashlib.sha256(acc['apiKey'].encode()).hexdigest()[:12] if acc else None
-        cycle = e.get('cycle_minutes') or cfg['cycle_minutes'].get(e['name']) or cfg['default_cycle_minutes']
-        bots.append({'name': e['name'], 'path': e['path'], 'account': acc, 'fp': fp, 'cycle': cycle})
+        sw = SWITCH_BOTS.get(e['name'])
+        cycle = (e.get('cycle_minutes') or cfg['cycle_minutes'].get(e['name']) or (sw or {}).get('cycle')
+                 or cfg['default_cycle_minutes'])
+        b = {'name': e['name'], 'path': e['path'], 'account': acc, 'fp': fp, 'cycle': cycle,
+             'account_live': acc, 'fp_live': fp}
+        apply_mode(b)
+        bots.append(b)
     return bots
 
 
@@ -180,15 +218,21 @@ def load_visibility(cfg, names):
     try:
         with open(BOTS_PATH, encoding='utf-8') as f:
             v = json.load(f)
-        return {'hidden': set(v.get('hidden') or []), 'known': set(v.get('known') or []),
-                'crit_hidden': bool(v.get('crit_hidden', False))}
+        out = {'hidden': set(v.get('hidden') or []), 'known': set(v.get('known') or []),
+               'crit_hidden': bool(v.get('crit_hidden', False)), 'switch_v1': bool(v.get('switch_v1'))}
+        if not out['switch_v1']:                 # einmalig: Bots mit Papier/Echtgeld-Schalter einblenden
+            out['hidden'] -= set(SWITCH_BOTS)
+            out['known'] |= set(SWITCH_BOTS) & set(names)
+            out['switch_v1'] = True
+            save_visibility(out)
+        return out
     except (OSError, ValueError, AttributeError):
         pass
     if cfg['bots'] == 'auto':
         shown = set(names)
     else:
-        shown = {b['name'] if isinstance(b, dict) else b for b in cfg['bots']} | {'evobot'}
-    v = {'hidden': {n for n in names if n not in shown}, 'known': set(names), 'crit_hidden': False}
+        shown = {b['name'] if isinstance(b, dict) else b for b in cfg['bots']} | set(SWITCH_BOTS)
+    v = {'hidden': {n for n in names if n not in shown}, 'known': set(names), 'crit_hidden': False, 'switch_v1': True}
     save_visibility(v)
     return v
 
@@ -219,7 +263,8 @@ def save_seen(seen):
 def save_visibility(v):
     tmp = BOTS_PATH + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump({'hidden': sorted(v['hidden']), 'known': sorted(v['known']), 'crit_hidden': v['crit_hidden']}, f, indent=1)
+        json.dump({'hidden': sorted(v['hidden']), 'known': sorted(v['known']), 'crit_hidden': v['crit_hidden'],
+                   'switch_v1': True}, f, indent=1)
     os.replace(tmp, BOTS_PATH)
 
 
@@ -337,6 +382,40 @@ def paper_closed(s, n=25):
                     'usd': c.get('stake', 0.0) * max(-1.0, c.get('lev', 1) * c.get('r', 0.0)),
                     'grund': c.get('grund') or c.get('reason') or ('liquidiert' if c.get('liquidated') else '')})
     return out
+
+
+def std_paper_summary(path, day_start_ms, prices=None):
+    """Papierkonto von jaegerbot/zockerbot (papier.py: konto.json), nur lesend."""
+    with open(path, encoding='utf-8') as f:
+        s = json.load(f)
+    prices = prices or {}
+    pos = []
+    for p in s.get('positions', []):
+        coin = p['symbol'].split('/')[0]
+        mark = prices.get(coin + 'USDT')
+        d = 1 if p['side'] == 'long' else -1
+        upnl = max(-p['margin'], d * (mark - p['entry']) * p['qty']) if mark else 0.0
+        pos.append({'symbol': p['symbol'], 'side': p['side'], 'size': p['qty'], 'entry': p['entry'], 'mark': mark,
+                    'upnl': upnl, 'leverage': p['lev'], 'liq': p['liq'],
+                    'liq_pct': abs(mark - p['liq']) / mark * 100 if mark else None,
+                    'notional': p['qty'] * p['entry'], 'margin': p['margin'], 'opened': p['opened_ms'],
+                    'sl': p.get('sl'), 'tp': p.get('tp'), 'trail': None, 'trail_cb': None,
+                    'nosl': not p.get('sl'), 'art': None, 'ziel': None})
+    closed = s.get('closed', [])
+    today = [c for c in closed if c.get('closed_ms', 0) >= day_start_ms]
+    equity = s.get('cash', 0.0) + sum(p['margin'] for p in s.get('positions', []))
+    start = s.get('start') or 100.0
+    ein = sum(e.get('betrag', 0) for e in s.get('einzahlungen', []))
+    letzte = [{'coin': c['symbol'].split('/')[0], 'art': c['side'].capitalize(), 'ms': c.get('closed_ms'),
+               'r': c['pnl'] / c['margin'] if c.get('margin') else 0.0, 'usd': c['pnl'], 'grund': c.get('grund', '')}
+              for c in sorted(closed, key=lambda c: c.get('closed_ms', 0), reverse=True)[:25]]
+    return {
+        'equity': equity, 'cash': s.get('cash', 0.0), 'start': start, 'nav': equity / (start + ein) if start + ein else None,
+        'einzahlungen': ein, 'pnl_today': sum(c['pnl'] for c in today), 'trades_today': len(today),
+        'pnl_total': sum(c['pnl'] for c in closed), 'trades_total': len(closed),
+        'wins': sum(1 for c in closed if c['pnl'] > 0), 'open': [], 'positions': pos, 'letzte': letzte,
+        'live': False, 'mult': None, 'leiter': None, 'evo': None, 'mtime': os.path.getmtime(path),
+    }
 
 
 def paper_summary(path, day_start_ms, prices=None):
@@ -532,7 +611,10 @@ class Store:
         times = sorted({t for s in per_account for t, _ in s if t >= since})
         if not times:
             return []
-        times = sorted({since, *times})  # Kurve beginnt genau am Anfang des Zeitraums
+        # Kurve beginnt genau am Anfang des Zeitraums -- oder erst mit dem ersten Wert, wenn das Konto jünger ist
+        # (neues Papierkonto: sonst Sprung von 0 auf das Startkapital)
+        first = min(s[0][0] for s in per_account if s)
+        times = sorted({max(since, first), *times})
         cur, idx, out = [0.0] * len(per_account), [0] * len(per_account), []
         for i, s in enumerate(per_account):
             while idx[i] < len(s) and s[idx[i]][0] < times[0]:
@@ -738,7 +820,7 @@ class Poller(threading.Thread):
 
     def is_hidden(self, name):
         """Ausgeblendet: in der App abgeschaltet oder neu gefunden und noch nie bestätigt."""
-        return name in self.vis['hidden'] or name not in self.vis['known']
+        return name in self.vis['hidden'] or (name not in self.vis['known'] and name not in SWITCH_BOTS)
 
     @property
     def bots(self):
@@ -915,6 +997,8 @@ class Poller(threading.Thread):
             except Exception:
                 log.exception('Bot-Suche fehlgeschlagen')
             self.scan_ts = time.time()
+        for b in self.all_bots:                  # Schalter Papier/Echtgeld bei jeder Abfrage neu lesen
+            apply_mode(b)
         seen = set()
         for b in self.polled():
             if b.get('paper'):
@@ -927,8 +1011,12 @@ class Poller(threading.Thread):
                     except Exception as e:              # ohne Kurse: Positionen ohne offenes Ergebnis zeigen
                         log.warning('Bitget-Kurse fuer %s nicht abrufbar: %s', b['name'], e)
                         prices = _TICKERS['px']
-                    a['paper'] = paper_summary(b['paper'], day0, prices); a['ts'], a['error'] = time.time(), None
+                    fn = std_paper_summary if b.get('paper_format') == 'std' else paper_summary
+                    a['paper'] = fn(b['paper'], day0, prices); a['ts'], a['error'] = time.time(), None
                     self.store.add_snap(b['pfp'], a['paper']['equity'])
+                except FileNotFoundError:
+                    a['paper'], a['error'] = None, ('noch kein Papierkonto – der Bot legt es beim ersten Lauf im '
+                                                    'Papiermodus an')
                 except Exception as e:
                     a['error'] = f'{type(e).__name__}: {str(e)[:160]}'
                 continue
@@ -969,16 +1057,24 @@ class Poller(threading.Thread):
                 act = ps.get('mtime')
                 running = act is not None and now - act < max(20, b['cycle'] * 3) * 60
                 bots.append({'name': b['name'], 'running': running, 'last_activity': act, 'cycle': b['cycle'],
-                             'has_key': False, 'paper': ps or None, 'shared_with': [], 'equity': ps.get('equity'),
+                             'has_key': False, 'paper': ps or {'open': [], 'positions': [], 'letzte': []},
+                             'shared_with': [], 'equity': ps.get('equity'),
                              'available': ps.get('cash'), 'upnl': sum(x['upnl'] for x in ps.get('positions') or []),
                              'positions': [], 'orders': [],
                              'pnl_today': ps.get('pnl_today', 0.0), 'trades_today': ps.get('trades_today', 0),
-                             'error': a.get('error'), 'data_ts': a.get('ts'), 'git': self.git.get(b['name'])})
+                             'error': a.get('error'), 'data_ts': a.get('ts'), 'git': self.git.get(b['name']),
+                             'modus': b.get('modus', 'papier')})
                 if not running:
                     alerts.append({'level': 'warn', 'bot': b['name'], 'title': 'Papierkonto aktualisiert sich nicht',
-                                   'text': a.get('error') or 'konto.json seit über 3 Stunden unverändert', 'ts': act or now})
+                                   'text': a.get('error') or f'konto.json seit über {max(20, b["cycle"] * 3)} min unverändert',
+                                   'ts': act or now})
                 continue
             act = last_activity(b['path'])
+            if b.get('activity_file'):           # evobot Echtgeld: Lebenszeichen = data/arten_live/konto.json
+                try:
+                    act = max(act or 0, os.path.getmtime(b['activity_file']))
+                except OSError:
+                    pass
             stale_after = max(20, b['cycle'] * 3) * 60
             running = act is not None and now - act < stale_after
             a = self.accounts.get(b['fp']) or {}
@@ -992,6 +1088,7 @@ class Poller(threading.Thread):
                 'positions': d.get('positions', []), 'orders': d.get('orders', []),
                 'pnl_today': pnl_today, 'trades_today': len(closes_today),
                 'error': a.get('error'), 'data_ts': a.get('ts'), 'git': self.git.get(b['name']),
+                'modus': b.get('modus'),
             }
             bots.append(item)
 
@@ -1012,7 +1109,7 @@ class Poller(threading.Thread):
                                    'ts': ts / 1000})
             for p in item['positions']:
                 coin = p['symbol'].split('/')[0]
-                if not p['sl']:
+                if not p['sl'] and not b.get('ohne_sl'):     # evobot/zockerbot handeln bewusst ohne SL
                     alerts.append({'level': 'crit', 'bot': b['name'], 'title': 'Position ohne Stop-Loss',
                                    'text': f'{coin} {p["side"]} · keine SL-Order auf Bitget gefunden', 'ts': p['opened']})
                 # Hoher Hebel allein ist kein Alarm -- gefaehrlich wird es erst, wenn
@@ -1155,7 +1252,8 @@ class App:
     def fps_for(self, bot):
         if bot in (None, '', 'all'):
             return sorted({b['fp'] for b in self.bots if b['fp']})
-        return [b['fp'] or b.get('pfp') for b in self.bots if b['name'] == bot and (b['fp'] or b.get('pfp'))]
+        return [b.get('pfp') if b.get('paper') else b['fp'] for b in self.bots
+                if b['name'] == bot and (b.get('pfp') if b.get('paper') else b['fp'])]
 
     def span(self, rng):
         """(Beginn, Bucket-Sekunden) eines Zeitraums. rng 'from:JJJJ-MM-TT' = frei gewaehltes Startdatum

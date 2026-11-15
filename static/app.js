@@ -557,11 +557,12 @@ function posCard() {
 
 function botRow(b) {
   const status = b.paper ? `Papierkonto · ${b.running ? 'läuft' : 'steht'} · ${ago(b.last_activity)}`
-    : !b.has_key ? 'kein API-Schlüssel gefunden' : b.running ? `läuft · ${ago(b.last_activity)}` : `steht · letzter Lauf ${ago(b.last_activity)}`;
+    : !b.has_key ? 'kein API-Schlüssel gefunden' : (b.modus === 'echtgeld' ? 'Echtgeld · ' : '')
+      + (b.running ? `läuft · ${ago(b.last_activity)}` : `steht · letzter Lauf ${ago(b.last_activity)}`);
   // Rechts: realisiert heute + offen jetzt = zusammen (wie die grosse Karte oben), links Kontostand und Positionen
   const has = b.paper || b.has_key, real = b.pnl_today || 0, open = b.upnl || 0;
   const val = (l, v, k) => `<span>${l}</span><b class="${cls(v)}" data-k="${esc(b.name)}:${k}">${has ? signed(v) : '—'}</b>`;
-  const npos = b.paper ? (b.paper.open || []).length : b.positions.length;
+  const npos = b.paper ? (b.paper.positions || b.paper.open || []).length : b.positions.length;
   return `<a class="bot${b.paper ? ' paper' : ''}" href="#/bot/${encodeURIComponent(b.name)}" style="--bc:${botColor(b.name)}">
     <span class="dot ${b.running ? 'on' : 'off'}" aria-hidden="true"></span>
     <div class="t"><b>${esc(b.name)}${botAlarm(b.name)}<span data-act="${esc(b.name)}"></span></b><span>${status}</span>
@@ -626,13 +627,14 @@ function viewPaper(b) {
   const dt = (ms) => ms ? new Date(ms).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
   const was = { 'befördert': 'befördert', 'herabgestuft': 'herabgestuft', 'ausgestorben': 'ausgestorben' };
   return `${header(esc(b.name), `<span class="dot ${b.running ? 'on' : 'off'}" style="display:inline-block;width:8px;height:8px;margin-right:6px"></span>Papierkonto · ${b.running ? 'läuft' : 'steht'} · ${ago(b.last_activity)}`, true)}
-  ${b.error ? `<div class="note">Papierkonto nicht lesbar: ${esc(b.error)}</div>` : ''}
-  <div class="note">${p.live ? 'Echtgeld-Modus' : 'Papierkonto mit echten Bitget-Kursen – kein echtes Geld, zählt nicht zum Gesamtkapital.'}</div>
+  ${b.error ? `<div class="note">${b.error.startsWith('noch kein') ? '' : 'Papierkonto nicht lesbar: '}${esc(b.error)}</div>` : ''}
+  <div class="note">${p.live ? 'Echtgeld-Modus' : 'Papierhandel mit echten Bitget-Kursen – kein echtes Geld, zählt nicht zum Gesamtkapital.'}
+    Umschalten in <span class="mono">${esc(b.name)}/settings.json</span>: <span class="mono">"echtgeld": {"aktiv": true}</span> – das Cockpit zeigt dann das Bitget-Konto.</div>
   <div class="card">
     <div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Kontostand (inkl. offener Positionen)</span><span class="mid">${nf((b.equity || 0) + (b.upnl || 0))} USDT</span></div>
     ${pnlSplit(b.pnl_today, b.upnl)}
     <span class="lbl">Rendite seit Start (ohne Einzahlungen): <b class="${cls(ren)}">${ren == null ? '—' : (ren >= 0 ? '+' : '') + ren.toFixed(2) + ' %'}</b> · Start ${nf(p.start)} USDT${p.einzahlungen ? ` · Einzahlungen ${nf(p.einzahlungen)}` : ''}</span>
-    <span class="lbl">Heute ${signed(p.pnl_today)} USDT (${p.trades_today || 0} Trades) · gesamt ${signed(p.pnl_total)} USDT in ${p.trades_total || 0} Trades · Treffer ${p.trades_total ? Math.round(100 * p.wins / p.trades_total) : 0} % · Einsatzfaktor ${p.mult ? '×' + String(p.mult).replace('.', ',') : '—'}</span>
+    <span class="lbl">Heute ${signed(p.pnl_today)} USDT (${p.trades_today || 0} Trades) · gesamt ${signed(p.pnl_total)} USDT in ${p.trades_total || 0} Trades · Treffer ${p.trades_total ? Math.round(100 * p.wins / p.trades_total) : 0} %${p.evo ? ` · Einsatzfaktor ${p.mult ? '×' + String(p.mult).replace('.', ',') : '—'}` : ''}</span>
     ${chartControls()}
     <div id="botchart">${SKEL}</div>
     <span class="lbl">Frei verfügbar: ${nf(b.available)} USDT</span>
@@ -645,7 +647,7 @@ function viewPaper(b) {
     <span class="grow">${esc(c.coin || '')} <span class="muted">${esc(c.art)}${c.grund ? ' · ' + esc(c.grund) : ''}</span></span>
     <b class="mono ${cls(c.usd)}">${signed(c.usd)}</b></div>`).join('')
     : '<div class="empty">Noch keine geschlossenen Trades</div>'}</div>
-  <h2>FVG-Leiter <small>Schatten-Art · kein Kapital</small></h2>
+  ${p.evo ? `<h2>FVG-Leiter <small>Schatten-Art · kein Kapital</small></h2>
   <div class="card">${(() => { const L = p.leiter || {}; const f = (g) => g && g.n ? `${g.n} abgeschlossen · Ø ${g.avg >= 0 ? '+' : ''}${g.avg.toFixed(2).replace('.', ',')} % je Ereignis` : 'noch keine abgeschlossen';
     return `<span class="lbl">Fiktive Kauf-Limits an den 3 nächsten offenen FVGs nach einem Aufzug runter. Bewertet wird nur das Bullenregime.</span>
     <span class="lbl">Bullenregime (Regel): <b>${f(L.bulle)}</b></span><span class="lbl">Bärenregime (nur Info): ${f(L.baer)}</span>
@@ -662,7 +664,7 @@ function viewPaper(b) {
   </div>
   <div class="card tight">${(e.ereignisse || []).length ? e.ereignisse.slice().reverse().map((x) => `<div class="li"><span class="mono">${dt(x.t)}</span>
     <span class="grow">${esc(was[x.was] || x.was)}</span><span class="muted">${esc(x.genom)}</span></div>`).join('')
-    : '<div class="empty">noch keine Beförderung oder Herabstufung – Mutanten sammeln Ereignisse</div>'}</div>`;
+    : '<div class="empty">noch keine Beförderung oder Herabstufung – Mutanten sammeln Ereignisse</div>'}</div>` : ''}`;
 }
 
 function viewBot(name) {
@@ -675,6 +677,7 @@ function viewBot(name) {
   return `${header(esc(b.name), `<span class="dot ${b.running ? 'on' : 'off'}" style="display:inline-block;width:8px;height:8px;margin-right:6px"></span>${status}`, true)}
   <div class="chips" id="botchips">${b.git ? `<span class="chip mono">${esc(b.git.hash)}</span>` : ''}</div>
   ${b.error ? `<div class="note">Bitget-Abfrage fehlgeschlagen: ${esc(b.error)}</div>` : ''}
+  ${b.modus === 'echtgeld' ? `<div class="note">Echtgeld-Modus – echte Orders auf Bitget. Papierhandel: in <span class="mono">${esc(b.name)}/settings.json</span> <span class="mono">"echtgeld": {"aktiv": false}</span> setzen.</div>` : ''}
   ${b.shared_with.length ? `<div class="note">Gemeinsames Konto mit ${esc(b.shared_with.join(', '))} – Zahlen gelten für beide.</div>` : ''}
   <div class="card">
     <div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Kontostand (inkl. offener Positionen)</span><span class="mid" data-k="b:${esc(b.name)}:eq">${nf(b.equity)} USDT</span></div>
