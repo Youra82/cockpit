@@ -629,8 +629,9 @@ function viewPaper(b) {
   return `${header(esc(b.name), `<span class="dot ${b.running ? 'on' : 'off'}" style="display:inline-block;width:8px;height:8px;margin-right:6px"></span>Papierkonto · ${b.running ? 'läuft' : 'steht'} · ${ago(b.last_activity)}`, true)}
   ${b.error ? `<div class="note">${b.error.startsWith('noch kein') ? '' : 'Papierkonto nicht lesbar: '}${esc(b.error)}</div>` : ''}
   <div class="note">${p.live ? 'Echtgeld-Modus' : 'Papierhandel mit echten Bitget-Kursen – kein echtes Geld, zählt nicht zum Gesamtkapital.'}
-    ${b.name === '1mbot' ? 'Der 1mbot handelt nur auf Papier (keine Order-Funktionen).' : `Umschalten in <span class="mono">${esc(b.name)}/settings.json</span>: <span class="mono">"echtgeld": {"aktiv": true}</span> – das Cockpit zeigt dann das Bitget-Konto.`}
-    ${(p.wartend || []).length ? `<br>Wartet auf Einstieg (T+30 min): <b>${p.wartend.map(esc).join(', ')}</b>` : ''}</div>
+    ${['1mbot', 'kbot'].includes(b.name) ? `Der ${esc(b.name)} handelt nur auf Papier (keine Order-Funktionen).` : `Umschalten in <span class="mono">${esc(b.name)}/settings.json</span>: <span class="mono">"echtgeld": {"aktiv": true}</span> – das Cockpit zeigt dann das Bitget-Konto.`}
+    ${(p.wartend || []).length ? `<br>Wartet auf Einstieg (T+30 min): <b>${p.wartend.map(esc).join(', ')}</b>` : ''}
+    ${p.vergleich ? `<br>Angezeigt: Market-Konto (Taker). Vergleich ${esc(p.vergleich.name)}: <b>${nf(p.vergleich.equity)} USDT</b> · ${p.vergleich.trades} Trades · ${p.vergleich.verpasst} Einstiege nicht gefüllt` : ''}</div>
   <div class="card">
     <div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Kontostand (inkl. offener Positionen)</span><span class="mid">${nf((b.equity || 0) + (b.upnl || 0))} USDT</span></div>
     ${pnlSplit(b.pnl_today, b.upnl)}

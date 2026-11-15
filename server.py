@@ -152,6 +152,9 @@ SWITCH_BOTS = {
     # 1mbot kennt keine echten Orders: immer Papier (Upbit-Listing-Short, Zustand alle 10 s gespeichert)
     '1mbot': {'paper': os.path.join('data', 'listing_state.json'), 'format': 'listing', 'cycle': 5,
               'default_live': False, 'ohne_sl': False, 'nur_papier': True},
+    # kbot: Wal-Einzahlung -> Short 60 min, zwei Papierkonten (Market = Hauptkonto, Limit = Vergleich)
+    'kbot': {'paper': os.path.join('artifacts', 'state', 'paper_shorts.json'), 'format': 'kbot', 'cycle': 5,
+             'default_live': False, 'ohne_sl': True, 'nur_papier': True},
 }
 
 
@@ -224,11 +227,11 @@ def load_visibility(cfg, names):
         with open(BOTS_PATH, encoding='utf-8') as f:
             v = json.load(f)
         out = {'hidden': set(v.get('hidden') or []), 'known': set(v.get('known') or []),
-               'crit_hidden': bool(v.get('crit_hidden', False)), 'switch_v2': bool(v.get('switch_v2'))}
-        if not out['switch_v2']:                 # einmalig: Bots mit Papier/Echtgeld-Schalter einblenden
+               'crit_hidden': bool(v.get('crit_hidden', False)), 'switch_v3': bool(v.get('switch_v3'))}
+        if not out['switch_v3']:                 # einmalig: Bots mit Papier/Echtgeld-Schalter einblenden
             out['hidden'] -= set(SWITCH_BOTS)
             out['known'] |= set(SWITCH_BOTS) & set(names)
-            out['switch_v2'] = True
+            out['switch_v3'] = True
             save_visibility(out)
         return out
     except (OSError, ValueError, AttributeError):
@@ -237,7 +240,7 @@ def load_visibility(cfg, names):
         shown = set(names)
     else:
         shown = {b['name'] if isinstance(b, dict) else b for b in cfg['bots']} | set(SWITCH_BOTS)
-    v = {'hidden': {n for n in names if n not in shown}, 'known': set(names), 'crit_hidden': False, 'switch_v2': True}
+    v = {'hidden': {n for n in names if n not in shown}, 'known': set(names), 'crit_hidden': False, 'switch_v3': True}
     save_visibility(v)
     return v
 
@@ -269,7 +272,7 @@ def save_visibility(v):
     tmp = BOTS_PATH + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump({'hidden': sorted(v['hidden']), 'known': sorted(v['known']), 'crit_hidden': v['crit_hidden'],
-                   'switch_v2': True}, f, indent=1)
+                   'switch_v3': True}, f, indent=1)
     os.replace(tmp, BOTS_PATH)
 
 
@@ -420,6 +423,64 @@ def std_paper_summary(path, day_start_ms, prices=None):
         'pnl_total': sum(c['pnl'] for c in closed), 'trades_total': len(closed),
         'wins': sum(1 for c in closed if c['pnl'] > 0), 'open': [], 'positions': pos, 'letzte': letzte,
         'live': False, 'mult': None, 'leiter': None, 'evo': None, 'mtime': os.path.getmtime(path),
+    }
+
+
+def kbot_paper_summary(path, day_start_ms, prices=None):
+    """Papierkonten des kbot (artifacts/state/paper_shorts.json + logs/paper_shorts.csv), nur lesend.
+    Hauptkonto = Market (Taker, immer gefuellt); Limit (Maker) als Vergleich."""
+    import csv
+    with open(path, encoding='utf-8') as f:
+        s = json.load(f)
+    root = os.path.dirname(os.path.dirname(os.path.dirname(path)))
+    prices = prices or {}
+    ms = lambda iso: int(datetime.fromisoformat(iso).timestamp() * 1000) if iso else None
+    eq = s.get('equity') or {}
+    start = s.get('start') or 100.0
+    lev = 5.0
+    pos = []
+    for p in s.get('positions', []):
+        m = p.get('market') or {}
+        if m.get('state') != 'open':
+            continue
+        e, margin = m['price'], m['margin']
+        mark = prices.get(p['symbol'].split('/')[0] + 'USDT')
+        liq = e * (1 + 0.9 / lev)
+        upnl = max(-margin, margin * lev * (e - mark) / e) if mark else 0.0
+        pos.append({'symbol': p['symbol'], 'side': 'short', 'size': margin * lev / e, 'entry': e, 'mark': mark,
+                    'upnl': upnl, 'leverage': lev, 'liq': liq, 'liq_pct': abs(mark - liq) / mark * 100 if mark else None,
+                    'notional': margin * lev, 'margin': margin, 'opened': ms(p.get('opened')), 'sl': None, 'tp': None,
+                    'trail': None, 'trail_cb': None, 'nosl': True,
+                    'art': f"Wal-Einzahlung {p.get('usd', 0) / 1e6:.1f} Mio $", 'ziel': {'typ': 'zeit', 'ms': ms(p.get('due'))}})
+    rows = []
+    try:
+        with open(os.path.join(root, 'logs', 'paper_shorts.csv'), encoding='utf-8') as f:
+            rows = list(csv.DictReader(f))
+    except OSError:
+        pass
+    num = lambda x: float(x) if x not in (None, '') else 0.0
+    done = [r for r in rows if r['account'] == 'market' and r['status'] in ('closed', 'liquidated')]
+    lim = [r for r in rows if r['account'] == 'limit' and r['status'] in ('closed', 'liquidated')]
+    cms = lambda r: ms(r.get('exit_time')) or 0
+    today = [r for r in done if cms(r) >= day_start_ms]
+    letzte = [{'coin': r['token'], 'art': 'Short 60 min', 'ms': cms(r), 'r': num(r['ret_pct']) / 100,
+               'usd': num(r['pnl_usdt']), 'grund': 'liquidiert' if r['status'] == 'liquidated' else ''}
+              for r in sorted(done, key=cms, reverse=True)[:25]]
+    market = eq.get('market', start)
+    mtime = os.path.getmtime(path)
+    try:                                         # Lebenszeichen: die Schleife speichert alle 15 s ihren Stand
+        mtime = max(mtime, os.path.getmtime(os.path.join(root, 'artifacts', 'state', 'deposit_loop.json')))
+    except OSError:
+        pass
+    return {
+        'equity': market, 'cash': market - sum(x['margin'] for x in pos), 'start': start,
+        'nav': market / start if start else None, 'einzahlungen': 0,
+        'pnl_today': sum(num(r['pnl_usdt']) for r in today), 'trades_today': len(today),
+        'pnl_total': sum(num(r['pnl_usdt']) for r in done), 'trades_total': len(done),
+        'wins': sum(1 for r in done if num(r['pnl_usdt']) > 0), 'open': [], 'positions': pos, 'letzte': letzte,
+        'live': False, 'mult': None, 'leiter': None, 'evo': None, 'mtime': mtime,
+        'vergleich': {'name': 'Limit-Konto (Maker)', 'equity': eq.get('limit', start), 'trades': len(lim),
+                      'verpasst': sum(1 for r in rows if r['account'] == 'limit' and r['status'] == 'missed')},
     }
 
 
@@ -1055,8 +1116,8 @@ class Poller(threading.Thread):
                     except Exception as e:              # ohne Kurse: Positionen ohne offenes Ergebnis zeigen
                         log.warning('Bitget-Kurse fuer %s nicht abrufbar: %s', b['name'], e)
                         prices = _TICKERS['px']
-                    fn = {'std': std_paper_summary, 'listing': listing_paper_summary}.get(b.get('paper_format'),
-                                                                                       paper_summary)
+                    fn = {'std': std_paper_summary, 'listing': listing_paper_summary,
+                          'kbot': kbot_paper_summary}.get(b.get('paper_format'), paper_summary)
                     a['paper'] = fn(b['paper'], day0, prices); a['ts'], a['error'] = time.time(), None
                     self.store.add_snap(b['pfp'], a['paper']['equity'])
                 except FileNotFoundError:
