@@ -8,6 +8,7 @@ Server, nie Bitget direkt -- egal wie oft die App offen ist, die Last bei
 Bitget bleibt gleich. Es werden keine Orders gesendet oder storniert und
 keine Bot-Dateien geschrieben.
 """
+import bisect
 import gzip
 import hashlib
 import hmac
@@ -704,16 +705,46 @@ class Store:
         transfers = [(ts // 1000, amt) for ts, _, amt, _, bt in bills if is_transfer(bt)]
         return pts, transfers
 
+    def growth_points(self, fp):
+        """Zeitgewichtete Rendite aus dem Bitget-Kontoauszug: Index (Start 1) wird nur durch Trades,
+        Gebuehren und Funding bewegt; Ein-/Auszahlungen zaehlen mit Faktor 1, egal wie gross.
+        Jede Buchung traegt den Kontostand danach -> Einzahlungen sind sekundengenau getrennt,
+        auch wenn der Kontostand-Snapshot sie schon enthaelt. None, wenn es keinen Kontoauszug gibt.
+        Liefert Punkte (ts_s, index) und Ein-/Auszahlungen (ts_s, betrag)."""
+        with self.lock:
+            bills = self.db.execute('SELECT ts, balance, amount, fee, btype FROM bills WHERE fp=? ORDER BY ts, bid',
+                                    (fp,)).fetchall()
+        bills = [b for b in bills if b[1] is not None]
+        if not bills:
+            return None
+        ts0, bal0, amt0, fee0, bt0 = bills[0]
+        prev = bal0 - (amt0 or 0) - (fee0 or 0)
+        idx, pts, transfers = 1.0, [(0, 1.0)], []
+        for ts, bal, amt, _, bt in bills:
+            if is_transfer(bt):
+                if amt:
+                    transfers.append((ts // 1000, amt))
+            elif prev >= 1:  # leeres Konto (< 1 USDT) nicht als Rendite werten
+                idx *= max(bal, 0.0) / prev
+            prev = bal
+            pts.append((ts // 1000, idx))
+        return pts, transfers
+
     def equity_series(self, fps, since, bucket, perf):
         """Summe ueber Konten, je Zeit-Bucket. perf=True rechnet Ein-/Auszahlungen heraus
         (frueheren Werten werden spaetere Einzahlungen zugeschlagen -> keine Spruenge, Endwert = heute)."""
         per_account = []
         for fp in fps:
             pts, transfers = self.account_points(fp)
+            with self.lock:
+                first_snap = self.db.execute('SELECT MIN(ts) FROM rsnaps WHERE fp=?', (fp,)).fetchone()[0]
             buckets = {}
             for t, v in pts:
                 if perf:
-                    v += sum(a for tt, a in transfers if tt > t)
+                    # Snapshot-Zeit ist auf 5 min abgerundet, der Wert stammt vom Ende des Fensters ->
+                    # Einzahlung im selben Fenster ist schon enthalten (sonst doppelt gezaehlt)
+                    te = t + 299 if first_snap is not None and t >= first_snap else t
+                    v += sum(a for tt, a in transfers if tt > te)
                 buckets[t // bucket * bucket] = v
             per_account.append(sorted(buckets.items()))
         times = sorted({t for s in per_account for t, _ in s if t >= since})
@@ -1503,20 +1534,33 @@ class App:
         return sorted(out, key=lambda x: x['t'])
 
     def race(self, rng):
-        """Gewinnkurve je Bot auf gemeinsamem Zeitraster (fuer das Bot-Rennen)."""
+        """Rendite-Index je Bot auf gemeinsamem Zeitraster (fuer das Bot-Rennen). Echte Konten: zeitgewichtet
+        aus dem Kontoauszug, Ein-/Auszahlungen herausgerechnet und als Markierung 'tr' (Rasterindex, Betrag)."""
         since, bucket = self.span(rng)
-        grid = list(range(since, int(time.time()) + 1, bucket))
+        now = int(time.time())
+        grid = list(range(since, now + bucket, bucket))
+        grid[-1] = now  # letzter Punkt = jetzt, damit "heute" wirklich der aktuelle Stand ist
         out = []
         for b in self.bots:
             if not b['fp']:
                 continue
-            pts, vals, k, cur = self.store.equity_series([b['fp']], since, bucket, True), [], 0, None
+            g = self.store.growth_points(b['fp'])
+            if g:
+                pts, transfers = g
+            else:  # Papierkonten ohne Kontoauszug: bisherige Gewinnkurve
+                pts, transfers = self.store.equity_series([b['fp']], since, bucket, True), []
+            vals, k, cur = [], 0, None
             for t in grid:
                 while k < len(pts) and pts[k][0] <= t:
                     cur = pts[k][1]
                     k += 1
-                vals.append(None if cur is None else round(cur, 2))
-            out.append({'name': b['name'], 'v': vals})
+                vals.append(None if cur is None else round(cur * 100 if g else cur, 4))
+            tr = {}
+            for ts, amt in transfers:
+                if ts >= since:
+                    i = min(bisect.bisect_left(grid, ts), len(grid) - 1)  # erster Rasterpunkt, der sie enthaelt
+                    tr[i] = tr.get(i, 0) + amt
+            out.append({'name': b['name'], 'v': vals, 'tr': [[i, round(a, 2)] for i, a in sorted(tr.items())]})
         return {'t': grid, 'bots': out}
 
     def events(self, days=7):

@@ -91,7 +91,8 @@ function drawRace(box, race) {
   // Jede Kurve ab ihrem ersten Wert > 0 auf 100 setzen
   const series = (race?.bots || []).map((b) => {
     const k = b.v.findIndex((v) => v != null && v > 0);
-    return { name: b.name, v: k < 0 ? [] : b.v.map((v, i) => (i < k || v == null ? null : v / b.v[k] * 100)) };
+    // tr: Ein-/Auszahlungen [Rasterindex, USDT] -- vom Server schon herausgerechnet, hier nur markiert
+    return { name: b.name, tr: (b.tr || []).filter(([i]) => i >= k), v: k < 0 ? [] : b.v.map((v, i) => (i < k || v == null ? null : v / b.v[k] * 100)) };
   }).filter((s) => s.v.length);
   if (!series.length || race.t.length < 3) return tooFew(box, 'Noch zu wenig Verlauf.');
   const N = race.t.length;
@@ -127,6 +128,13 @@ function drawRace(box, race) {
         'stroke-opacity': on ? 1 : 0.22, 'stroke-linejoin': 'round' }, svg);
       const lastV = s.v[N - 1];
       if (lastV != null) svgEl('circle', { cx: X1, cy: y(lastV), r: raceSel === s.name ? 4.5 : 3, fill: botColor(s.name), 'fill-opacity': on ? 1 : 0.25 }, svg);
+      // Einzahlung = Dreieck nach oben, Auszahlung = nach unten (zaehlt nicht als Gewinn/Verlust)
+      s.tr.forEach(([j, a]) => {
+        if (s.v[j] == null) return;
+        const cx = x(j), cy = y(s.v[j]), d = a > 0 ? -1 : 1;
+        svgEl('path', { d: `M${(cx - 4).toFixed(1)} ${(cy - d * 3).toFixed(1)} L${(cx + 4).toFixed(1)} ${(cy - d * 3).toFixed(1)} L${cx.toFixed(1)} ${(cy + d * 4).toFixed(1)} Z`,
+          fill: cssVar('--card'), stroke: botColor(s.name), 'stroke-width': 1.5, 'stroke-opacity': on ? 1 : 0.25, 'fill-opacity': on ? 1 : 0.25 }, svg);
+      });
     });
     svgText(svg, X0, 176, dayStr(race.t[0] * 1000));
     svgText(svg, X1, 176, 'heute', 'end');
@@ -138,7 +146,10 @@ function drawRace(box, race) {
     const rank = act.filter((s) => s.v[i] != null).sort((a, b) => b.v[i] - a.v[i]);
     const sel = rank.find((s) => s.name === raceSel);
     say(sel ? `<span>${pick != null ? timeStr(race.t[i] * 1000) : 'Heute'} · <b style="color:${botColor(sel.name)}">${esc(sel.name)}</b> steht bei <b class="${cls(sel.v[i] - 100)}">${nf(sel.v[i], 1)}</b></span>
-        <span>Platz ${rank.indexOf(sel) + 1} von ${rank.length} · ${signed(sel.v[i] - 100, 1)} % seit Start · Namen nochmal antippen zeigt wieder alle</span>`
+        <span>Platz ${rank.indexOf(sel) + 1} von ${rank.length} · ${signed(sel.v[i] - 100, 1)} % seit Start${(() => {
+          const inn = sel.tr.filter(([j, a]) => j <= i && a > 0).reduce((t, [, a]) => t + a, 0), out = sel.tr.filter(([j, a]) => j <= i && a < 0).reduce((t, [, a]) => t + a, 0);
+          return inn || out ? ` · herausgerechnet: ${[inn ? `Einzahlungen ${signed(inn, 0)}` : '', out ? `Auszahlungen ${signed(out, 0)}` : ''].filter(Boolean).join(', ')} USDT` : '';
+        })()} · Namen nochmal antippen zeigt wieder alle</span>`
       : `<span>${pick != null ? timeStr(race.t[i] * 1000) : 'Heute'} · Rangfolge (Start = 100) · Bot antippen hebt ihn hervor</span>
       <span>${rank.map((s) => `<span style="color:${botColor(s.name)}">${esc(s.name)}</span> <b class="sm">${nf(s.v[i], 1)}</b>`).join(' · ')}</span>`);
   }

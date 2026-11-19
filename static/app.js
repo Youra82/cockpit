@@ -934,7 +934,7 @@ function groupBody(g, d) {
   ${viz('vizA', 'Rückgang vom Höchststand', '90 Tage', 'Wie tief liege ich unter meinem besten Stand, und wie lange hat die Erholung gedauert?')}
   ${viz('vizP', 'Ziel-Prognose', 'bei gleichem Tempo', 'Wann wäre das Ziel erreicht, wenn es so weitergeht wie zuletzt?')}`;
   if (g === 'bots') return `${viz('vizS', 'Zeugnis &amp; Live gegen Backtest', 'Note je Bot', 'Welcher Bot läuft gut, welcher braucht Aufmerksamkeit? Die Note setzt sich aus Laufen, Live gegen Backtest, Gewinn, Rückgang und Gebühren zusammen. Zeile antippen zeigt die Begründung und den täglichen Live-Check des Bots.')}
-  ${viz('vizB', 'Bot-Rennen', 'Start = 100', 'Welcher Bot entwickelt sich am besten, egal wie viel Geld auf seinem Konto liegt?')}
+  ${viz('vizB', 'Bot-Rennen', 'Start = 100', 'Welcher Bot entwickelt sich am besten, egal wie viel Geld auf seinem Konto liegt? Ein- und Auszahlungen zählen nicht als Gewinn oder Verlust: Sie sind herausgerechnet und mit einem kleinen Dreieck markiert (▲ Einzahlung, ▼ Auszahlung).')}
   ${viz('vizK', 'Welche Coins bringen Geld?', '90 Tage', 'Gewinn und Verlust je Coin, für jeden Bot einzeln.')}
   ${viz('vizU', 'Gebühren-Spiegel', '30 Tage', 'Wie viel zahlt jeder Bot an Gebühren, und wie viel wäre mit Limit-Orders sparbar?')}`;
   if (g === 'trades') return `${viz('vizC', 'Wohin das Geld geht', 'Zeitraum wählbar', 'Was bringen die Trades, und was fressen Gebühren und Funding wieder auf?')}
