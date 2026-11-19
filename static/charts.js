@@ -485,6 +485,9 @@ function drawTradeChart(box, t, data) {
   const C = (data && data.c) || [];
   if (C.length < 3) return tooFew(box, 'Keine Kerzen für diesen Zeitraum.');
   const { svg, say } = chartShell(box, 230, 'Kerzenchart des Trades');
+  // Papier-Trades ohne gespeicherten Kurs: Schlusskurs der Kerze zum Ein-/Ausstiegszeitpunkt
+  const at = (ms) => (C.find((k, i) => i === C.length - 1 || C[i + 1][0] > ms) || C[C.length - 1])[4];
+  t = { ...t, open_price: t.open_price ?? at(t.ctime), close_price: t.close_price ?? at(t.utime) };
   const lo0 = Math.min(...C.map((k) => k[3]), t.open_price, t.close_price), hi0 = Math.max(...C.map((k) => k[2]), t.open_price, t.close_price);
   const pad = (hi0 - lo0) * 0.08 || hi0 * 0.01, lo = lo0 - pad, hi = hi0 + pad;
   const X0 = 6, X1 = 296, Y0 = 8, Y1 = 196, N = C.length, cw = (X1 - X0) / N;

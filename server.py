@@ -570,6 +570,65 @@ def paper_summary(path, day_start_ms, prices=None):
     }
 
 
+PAPER_FEE = 0.0006   # Taker-Gebuehr je Seite in den Papierkonten (papier.py, 1mbot FEE_SIDE, evobot EVO_FEE)
+
+
+def paper_close_rows(path, fmt):
+    """Geschlossene Papier-Trades im Format von norm_close -> dieselbe Tabelle wie Bitget-Trades (eigenes Konto
+    'paper:<bot>'), damit Kennzahlen, Verlaufsseiten, Trade-Chart und Mini-Kurve auch fuer Papier-Bots gehen.
+    (pid, symbol, side, open, close, size, pnl brutto, net, fees, funding, ctime_ms, utime_ms)"""
+    iso_ms = lambda iso: int(datetime.fromisoformat(iso).timestamp() * 1000) if iso else 0
+    num = lambda x: float(x) if x not in (None, '') else 0.0
+    sym_of = lambda coin: f"{EVO_SYM.get(coin, coin)}/USDT:USDT"
+    rows = []
+    if fmt == 'kbot':
+        import csv
+        root = os.path.dirname(os.path.dirname(os.path.dirname(path)))
+        try:
+            with open(os.path.join(root, 'logs', 'paper_shorts.csv'), encoding='utf-8') as f:
+                csv_rows = list(csv.DictReader(f))
+        except OSError:
+            return []
+        for r in csv_rows:
+            if r['account'] != 'market' or r['status'] not in ('closed', 'liquidated'):
+                continue
+            e, x, m = num(r['entry']), num(r['exit']), num(r['margin'])
+            size = m * 5.0 / e if e else None
+            fees = -(size or 0) * (e + x) * PAPER_FEE
+            net = num(r['pnl_usdt'])
+            rows.append((f"paper-{r['symbol']}-{iso_ms(r['entry_time'])}", r['symbol'], 'short', e, x, size,
+                         net - fees, net, fees, 0.0, iso_ms(r['entry_time']), iso_ms(r['exit_time'])))
+        return rows
+    with open(path, encoding='utf-8') as f:
+        s = json.load(f)
+    for c in s.get('closed', []):
+        if fmt == 'std':
+            fees = -c['qty'] * (c['entry'] + c['exit']) * PAPER_FEE
+            rows.append((f"paper-{c['symbol']}-{int(c['opened_ms'])}", c['symbol'], c['side'], c['entry'], c['exit'], c['qty'],
+                         c['pnl'] - fees, c['pnl'], fees, 0.0, c['opened_ms'], c['closed_ms']))
+        elif fmt == 'listing':
+            e, x, n = c.get('entry_bid'), c.get('exit_ask') or c.get('stop_price'), c.get('notional') or 0.0
+            sym = c['symbol'].replace('USDT', '') + '/USDT:USDT'
+            fees = -n * 2 * PAPER_FEE
+            net, fund = c.get('pnl_usdt', 0.0), n * (c.get('funding_short') or 0.0)   # + = erhalten
+            rows.append((f"paper-{c['symbol']}-{c.get('entry_time')}", sym, 'short', e, x, n / e if e else None,
+                         net - fees - fund, net, fees, fund, iso_ms(c.get('entry_time')), iso_ms(c.get('close_time'))))
+        else:  # evobot: Rendite r je Kurs, Ergebnis = Einsatz x Hebel x r (hoechstens der Einsatz)
+            art, st, lev = c.get('art'), c.get('stake', 0.0), c.get('lev', 1)
+            side = 'short' if art in ('baer', 'unlock_short', 'btc_trend_short') else 'long'
+            net = st * max(-1.0, lev * c.get('r', 0.0))
+            e = c.get('entry_eff') or c.get('entry_px')
+            n = st * lev
+            fees = -n * 2 * EVO_FEE
+            sym = c.get('symbol') or sym_of(c.get('coin') or '?')
+            if '/' not in sym:
+                sym = sym.replace('USDT', '') + '/USDT:USDT'
+            t0 = c.get('entry_ms') or c.get('closed_ms')
+            rows.append((f"paper-{art}-{c.get('coin')}-{int(t0 or 0)}", sym, side, e, c.get('exit_px'), n / e if e else None,
+                         net - fees, net, fees, 0.0, t0, c.get('closed_ms')))
+    return [(*r[:10], int(r[10] or 0), int(r[11] or 0)) for r in rows]
+
+
 def last_activity(bot_path):
     """Juengste Aenderung einer Log-Datei des Bots = letzter Lauf."""
     newest = None
@@ -769,6 +828,14 @@ class Store:
 
     def add_closes(self, fp, rows):
         with self.lock:
+            self.db.executemany('INSERT OR REPLACE INTO closes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                                [(fp, *r) for r in rows])
+            self.db.commit()
+
+    def set_closes(self, fp, rows):
+        """Alle Trades eines Kontos ersetzen (Papierkonten: Quelle ist die Kontodatei, auch nach einem Neustart)."""
+        with self.lock:
+            self.db.execute('DELETE FROM closes WHERE fp=?', (fp,))
             self.db.executemany('INSERT OR REPLACE INTO closes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
                                 [(fp, *r) for r in rows])
             self.db.commit()
@@ -1154,6 +1221,12 @@ class Poller(threading.Thread):
                           'kbot': kbot_paper_summary}.get(b.get('paper_format'), paper_summary)
                     a['paper'] = fn(b['paper'], day0, prices); a['ts'], a['error'] = time.time(), None
                     self.store.add_snap(b['pfp'], a['paper']['equity'])
+                    if a.get('closes_mtime') != a['paper'].get('mtime'):   # Trades nur neu einlesen, wenn sich das Konto aendert
+                        try:
+                            self.store.set_closes(b['pfp'], paper_close_rows(b['paper'], b.get('paper_format')))
+                            a['closes_mtime'] = a['paper'].get('mtime')
+                        except Exception as e:
+                            log.warning('%s: Papier-Trades nicht lesbar: %s', b['name'], e)
                 except FileNotFoundError:
                     a['paper'], a['error'] = None, ('noch kein Papierkonto – der Bot legt es beim ersten Lauf im '
                                                     'Papiermodus an')
@@ -1533,7 +1606,7 @@ class App:
                     out.append({'t': ts // 1000, 'amt': round(amt, 2), 'bot': b['name']})
         return sorted(out, key=lambda x: x['t'])
 
-    def race(self, rng):
+    def race(self, rng, paper=False):
         """Rendite-Index je Bot auf gemeinsamem Zeitraster (fuer das Bot-Rennen). Echte Konten: zeitgewichtet
         aus dem Kontoauszug, Ein-/Auszahlungen herausgerechnet und als Markierung 'tr' (Rasterindex, Betrag)."""
         since, bucket = self.span(rng)
@@ -1542,13 +1615,14 @@ class App:
         grid[-1] = now  # letzter Punkt = jetzt, damit "heute" wirklich der aktuelle Stand ist
         out = []
         for b in self.bots:
-            if not b['fp']:
+            fp = b['fp'] or (b.get('pfp') if paper and b.get('paper') else None)   # Papier nur auf Wunsch (Mini-Kurven)
+            if not fp:
                 continue
-            g = self.store.growth_points(b['fp'])
+            g = self.store.growth_points(fp)
             if g:
                 pts, transfers = g
             else:  # Papierkonten ohne Kontoauszug: bisherige Gewinnkurve
-                pts, transfers = self.store.equity_series([b['fp']], since, bucket, True), []
+                pts, transfers = self.store.equity_series([fp], since, bucket, True), []
             vals, k, cur = [], 0, None
             for t in grid:
                 while k < len(pts) and pts[k][0] <= t:
@@ -1584,11 +1658,14 @@ class App:
         out.sort(key=lambda e: -e['ts'])
         return out[:300]
 
+    def paper_fps(self):
+        return sorted({b['pfp'] for b in self.bots if b.get('paper') and b.get('pfp')})
+
     def trade(self, pid):
-        r = self.store.close_by_pid(self.fps_for('all'), pid)
+        r = self.store.close_by_pid(self.fps_for('all') + self.paper_fps(), pid)
         if not r:
             return None
-        name = next((b['name'] for b in self.bots if b['fp'] == r['fp']), None)
+        name = next((b['name'] for b in self.bots if r['fp'] in (b['fp'], b.get('pfp'))), None)
         return {**{k: v for k, v in r.items() if k != 'fp'}, 'bot': name}
 
     def candles(self, symbol, start_ms, end_ms):
@@ -1638,14 +1715,17 @@ class App:
         with open(path, 'rb') as f:
             return f.read()
 
-    def trades(self, rng=None):
-        """Geschlossene Trades (Standard: letzte 89 Tage, sonst ab Startdatum), kompakt (Punktwolke, Heatmap, Kosten)."""
-        fps = self.fps_for('all')
+    def trades(self, rng=None, paper=False):
+        """Geschlossene Trades (Standard: letzte 89 Tage, sonst ab Startdatum), kompakt (Punktwolke, Heatmap, Kosten).
+        paper=True: zusaetzlich die Papierkonten (nur fuer Papier-Bot-Seiten; Gesamtauswertungen bleiben echt)."""
+        fps = self.fps_for('all') + (self.paper_fps() if paper else [])
         if not fps:
             return []
         name_of = {}
         for b in self.bots:
             name_of.setdefault(b['fp'], b['name'])
+            if b.get('pfp'):
+                name_of.setdefault(b['pfp'], b['name'])
         since = self.span(rng)[0] if rng else int(time.time() - 89 * 86400)
         rows = self.store.closes(fps, int(since * 1000))
         return [{'bot': name_of.get(r['fp']), 'pid': r['pid'], 'sym': r['symbol'], 'side': r['side'], 'net': r['net'], 'pnl': r['pnl'],
@@ -1801,6 +1881,8 @@ class App:
         name_of = {}
         for b in self.bots:
             name_of.setdefault(b['fp'], b['name'])
+            if b.get('pfp'):
+                name_of.setdefault(b['pfp'], b['name'])
         days = {}   # Tagesergebnis ueber 26 Wochen (Kalender + Halbjahres-Uebersicht), soweit gespeichert
         for r in self.store.closes(fps, int((time.time() - 183 * 86400) * 1000)):
             d = datetime.fromtimestamp(r['utime'] / 1000, tz).strftime('%Y-%m-%d')
@@ -1939,9 +2021,9 @@ def make_handler(app):
             if url.path == '/api/stats':
                 return self.send_json(app.stats(q.get('bot')))
             if url.path == '/api/race':
-                return self.send_json(app.race(rng('Alles')))
+                return self.send_json(app.race(rng('Alles'), q.get('paper') == '1'))
             if url.path == '/api/trades':
-                return self.send_json(app.trades(rng(None)))
+                return self.send_json(app.trades(rng(None), q.get('paper') == '1'))
             if url.path == '/api/events':
                 return self.send_json(app.events())
             if url.path == '/api/trade':

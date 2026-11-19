@@ -567,7 +567,7 @@ function botRow(b) {
     <span class="dot ${b.running ? 'on' : 'off'}" aria-hidden="true"></span>
     <div class="t"><b>${esc(b.name)}${botAlarm(b.name)}<span data-act="${esc(b.name)}"></span></b><span>${status}</span>
       ${has ? `<span>${nf(b.equity)} USDT · ${npos} Pos.</span>` : ''}</div>
-    ${b.paper ? '' : `<span class="spark" data-spark="${esc(b.name)}"></span>`}
+    <span class="spark" data-spark="${esc(b.name)}"></span>
     <div class="r pnl3">${val('realisiert', real, 'r')}${val('offen', open, 'o')}${val('zus.', real + open, 'z')}</div>${icon.chev}</a>`;
 }
 
@@ -641,14 +641,20 @@ function viewPaper(b) {
     <div id="botchart">${SKEL}</div>
     <span class="lbl">Frei verfügbar: ${nf(b.available)} USDT</span>
   </div>
+  <h2>Kennzahlen <small>Zeitraum wie die Kurve · Papier</small></h2>
+  <div class="card" id="botkpi">${SKEL}</div>
   <h2>Offene Positionen <small>${(p.positions || []).length} · Papier</small></h2>
   <div class="card" id="botpos"></div>
-  <h2>Letzte Trades <small>${p.trades_total || 0} gesamt</small></h2>
-  <div class="card tight">${(p.letzte || []).length ? p.letzte.map((c) => `<div class="li">
+  <h2>Letzte Trades <small>${p.trades_total || 0} gesamt · antippen für Chart</small></h2>
+  <div class="card tight" id="bottrades">${(p.letzte || []).length ? p.letzte.map((c) => `<div class="li">
     <span class="muted" style="width:86px">${c.ms ? timeStr(c.ms) : '—'}</span>
     <span class="grow">${esc(c.coin || '')} <span class="muted">${esc(c.art)}${c.grund ? ' · ' + esc(c.grund) : ''}</span></span>
     <b class="mono ${cls(c.usd)}">${signed(c.usd)}</b></div>`).join('')
     : '<div class="empty">Noch keine geschlossenen Trades</div>'}</div>
+  <h2>Welche Coins bringen Geld? <small>90 Tage · Papier</small></h2>
+  <div class="card" id="botcoins">${SKEL}</div>
+  <h2>Gebühren <small>30 Tage · Papier, geschätzt</small></h2>
+  <div class="card" id="botfees">${SKEL}</div>
   ${p.evo ? `<h2>FVG-Leiter <small>Schatten-Art · kein Kapital</small></h2>
   <div class="card">${(() => { const L = p.leiter || {}; const f = (g) => g && g.n ? `${g.n} abgeschlossen · Ø ${g.avg >= 0 ? '+' : ''}${g.avg.toFixed(2).replace('.', ',')} % je Ereignis` : 'noch keine abgeschlossen';
     return `<span class="lbl">Fiktive Kauf-Limits an den 3 nächsten offenen FVGs nach einem Aufzug runter. Bewertet wird nur das Bullenregime.</span>
@@ -767,11 +773,23 @@ function moreList(rows, n = 5) {
     <button type="button" class="showmore">alle ${rows.length} zeigen</button>`;
 }
 
+const paperQ = (b) => (b && b.paper ? '&paper=1' : '');   // Papier-Trades nur auf Papier-Bot-Seiten mitladen
+
 function tradeRows(trades, withBot) {
   if (!trades.length) return '<div class="empty">Noch keine geschlossenen Trades</div>';
   return moreList(trades.slice(0, 25).map((t) => `<a class="li" href="#/trade/${encodeURIComponent(t.pid)}">
     <span class="muted" style="width:86px">${timeStr(t.utime)}</span>
     <span class="grow">${t.bot && withBot ? `<i class="bdot" style="background:${botColor(t.bot)}"></i>` : ''}${esc(coin(t.symbol))} <span class="muted">${esc(t.side || '')}${withBot ? ' · ' + esc(t.bot || '') : ''}</span></span>
+    <b class="mono ${cls(t.net)}">${signed(t.net)}</b>${icon.chev}</a>`));
+}
+
+// Papier-Bot: Trades aus der Trade-Tabelle (antippbar fuer den Chart), Art/Grund aus dem Papierkonto dazu
+function paperTradeRows(trades, letzte) {
+  const why = new Map((letzte || []).map((c) => [`${c.coin}|${c.ms}`, [c.art, c.grund].filter(Boolean).join(' · ')]));
+  if (!trades.length) return '<div class="empty">Noch keine geschlossenen Trades</div>';
+  return moreList(trades.slice(0, 25).map((t) => `<a class="li" href="#/trade/${encodeURIComponent(t.pid)}">
+    <span class="muted" style="width:86px">${timeStr(t.utime)}</span>
+    <span class="grow">${esc(coin(t.symbol))} <span class="muted">${esc(why.get(`${coin(t.symbol).split('/')[0]}|${t.utime}`) || t.side || '')}</span></span>
     <b class="mono ${cls(t.net)}">${signed(t.net)}</b>${icon.chev}</a>`));
 }
 
@@ -1260,7 +1278,7 @@ async function render() {
       // Kurve + Markierungen (Trades, Ein-/Auszahlungen, heute inkl. offen) und Mini-Kurven je Bot
       const [pts, trades, transfers, open, race] = await Promise.all([eq('all'), cachedApi('/api/trades?x=1' + fromQ()).catch(() => []),
         cachedApi(`/api/transfers?bot=all&range=${ui.range}${fromQ()}`, 300000).catch(() => []),
-        isToday() ? api('/api/open?bot=all').catch(() => []) : [], cachedApi('/api/race?range=1W', 300000).catch(() => null)]);
+        isToday() ? api('/api/open?bot=all').catch(() => []) : [], cachedApi('/api/race?range=1W&paper=1', 300000).catch(() => null)]);
       const ex = { trades, transfers, open };
       const el = document.getElementById('homechart'); if (el) { el.innerHTML = chartWithSummary(pts, ex); bindScrub(el, pts, ex); }
       (race?.bots || []).forEach((s) => { const sp = app.querySelector(`[data-spark="${CSS.escape(s.name)}"]`); if (sp) sp.innerHTML = sparkSvg(s.v); });
@@ -1274,7 +1292,7 @@ async function render() {
       if (!b) return;
       const enc = encodeURIComponent(r.arg);
       const [pts, st, trades, tradesAll, race, reports, transfers, open, teams] = await Promise.all([eq(r.arg), api(`/api/stats?bot=${enc}`),
-        cachedApi('/api/trades?x=1' + fromQ()), cachedApi('/api/trades?x=1'), b.paper ? null : cachedApi('/api/race?range=Alles', 300000),
+        cachedApi('/api/trades?x=1' + paperQ(b) + fromQ()), cachedApi('/api/trades?x=1' + paperQ(b)), b.paper ? null : cachedApi('/api/race?range=Alles', 300000),
         b.paper ? [] : api('/api/reports'),
         b.paper ? [] : cachedApi(`/api/transfers?bot=${enc}&range=${ui.range}${fromQ()}`, 300000).catch(() => []),
         !b.paper && isToday() ? api(`/api/open?bot=${enc}`).catch(() => []) : [],
@@ -1285,7 +1303,7 @@ async function render() {
       const ti = document.getElementById('teaminfo'); if (ti) showTeam(ti, teams, null, ex.teamTrades);
       const tl = document.getElementById('teamlist'); if (tl) drawTeamList(tl, teams, ex.teamTrades);
       const kp = document.getElementById('botkpi'); if (kp) drawKpis(kp, ex.trades, pts, r.arg);
-      const t = document.getElementById('bottrades'); if (t) t.innerHTML = tradeRows(st.trades, false);
+      const t = document.getElementById('bottrades'); if (t) t.innerHTML = b.paper ? paperTradeRows(st.trades, b.paper.letzte) : tradeRows(st.trades, false);
       const k = document.getElementById('botcoins'); if (k) drawCoins(k, trades, r.arg);
       const fe = document.getElementById('botfees'); if (fe) drawFees(fe, trades.filter((x) => x.bot === r.arg));
       // Note immer ueber die letzten 30 Tage, unabhaengig vom gewaehlten Startdatum
@@ -1297,7 +1315,7 @@ async function render() {
       }
     } else if (r.name === 'kpi') {
       // Kennzahl im Verlauf: Kurve des Bots (fuer Rueckgang und Zeitraum) + Trades des Bots
-      const [pts, trades] = await Promise.all([eq(r.arg), cachedApi('/api/trades?x=1' + fromQ())]);
+      const [pts, trades] = await Promise.all([eq(r.arg), cachedApi('/api/trades?x=1' + paperQ(state.bots.find((x) => x.name === r.arg)) + fromQ())]);
       const kb = document.getElementById('kpibox');
       if (kb && KPI[r.arg2]) drawKpiDetail(kb, r.arg2, trades.filter((x) => x.bot === r.arg), pts);
     } else if (r.name === 'trade') {
