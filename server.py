@@ -602,10 +602,11 @@ def paper_close_rows(path, fmt):
     with open(path, encoding='utf-8') as f:
         s = json.load(f)
     for c in s.get('closed', []):
-        if fmt == 'std':
-            fees = -c['qty'] * (c['entry'] + c['exit']) * PAPER_FEE
+        if fmt == 'std':   # papier.py: fee und funding je Trade gebucht (aeltere Trades ohne: Gebuehr geschaetzt)
+            fees = -c['fee'] if c.get('fee') is not None else -c['qty'] * (c['entry'] + c['exit']) * PAPER_FEE
+            fund = c.get('funding') or 0.0
             rows.append((f"paper-{c['symbol']}-{int(c['opened_ms'])}", c['symbol'], c['side'], c['entry'], c['exit'], c['qty'],
-                         c['pnl'] - fees, c['pnl'], fees, 0.0, c['opened_ms'], c['closed_ms']))
+                         c['pnl'] - fees - fund, c['pnl'], fees, fund, c['opened_ms'], c['closed_ms']))
         elif fmt == 'listing':
             e, x, n = c.get('entry_bid'), c.get('exit_ask') or c.get('stop_price'), c.get('notional') or 0.0
             sym = c['symbol'].replace('USDT', '') + '/USDT:USDT'
@@ -620,12 +621,13 @@ def paper_close_rows(path, fmt):
             e = c.get('entry_eff') or c.get('entry_px')
             n = st * lev
             fees = -n * 2 * EVO_FEE
+            fund = n * (c.get('funding_r') or 0.0)   # in r schon enthalten (evobot bucht Funding beim Ausstieg)
             sym = c.get('symbol') or sym_of(c.get('coin') or '?')
             if '/' not in sym:
                 sym = sym.replace('USDT', '') + '/USDT:USDT'
             t0 = c.get('entry_ms') or c.get('closed_ms')
             rows.append((f"paper-{art}-{c.get('coin')}-{int(t0 or 0)}", sym, side, e, c.get('exit_px'), n / e if e else None,
-                         net - fees, net, fees, 0.0, t0, c.get('closed_ms')))
+                         net - fees - fund, net, fees, fund, t0, c.get('closed_ms')))
     return [(*r[:10], int(r[10] or 0), int(r[11] or 0)) for r in rows]
 
 
