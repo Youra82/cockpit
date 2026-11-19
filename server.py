@@ -149,6 +149,9 @@ SWITCH_BOTS = {
                   'default_live': True, 'ohne_sl': False},
     'zockerbot': {'paper': os.path.join('data_papier', 'konto.json'), 'format': 'std', 'cycle': 15,
                   'default_live': True, 'ohne_sl': True},
+    # fibot: Konfluenz-Limit mit angehaengtem SL/TP; Papier-Fills ueber 1m-Kerzen (utils/exchange.PapierExchange)
+    'fibot': {'paper': os.path.join('artifacts', 'papier', 'konto.json'), 'format': 'std', 'cycle': 15,
+              'default_live': True, 'ohne_sl': False},
     # 1mbot kennt keine echten Orders: immer Papier (Upbit-Listing-Short, Zustand alle 10 s gespeichert)
     '1mbot': {'paper': os.path.join('data', 'listing_state.json'), 'format': 'listing', 'cycle': 5,
               'default_live': False, 'ohne_sl': False, 'nur_papier': True},
@@ -393,7 +396,7 @@ def paper_closed(s, n=25):
 
 
 def std_paper_summary(path, day_start_ms, prices=None):
-    """Papierkonto von jaegerbot/zockerbot (papier.py: konto.json), nur lesend."""
+    """Papierkonto von jaegerbot/zockerbot/fibot (papier.py: konto.json), nur lesend."""
     with open(path, encoding='utf-8') as f:
         s = json.load(f)
     prices = prices or {}
