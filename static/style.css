@@ -565,3 +565,5 @@ a.kpi:active { transform: scale(.97); background: var(--soft); }
 .bbar { height: 6px; border-radius: 3px; background: var(--soft); overflow: hidden; }
 .bbar i { display: block; height: 100%; border-radius: 3px; }
 @media (max-width: 360px) { .barorow .gauge { width: 128px; } .barorow.big .gauge { width: 150px; } }
+.netl { display: flex; flex-direction: column; gap: 4px; }
+.netl .lsbar { height: 6px; margin: 0; }

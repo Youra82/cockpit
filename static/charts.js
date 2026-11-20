@@ -1212,6 +1212,18 @@ function mktLine(m) {
   const tr = baroTrend(m.score, m.prev);
   return `<span class="lbl"><i class="lg" style="background:var(--btc)"></i>BTC <b style="color:var(--btc)">${esc(m.label)} ${m.score}</b> <span class="${tr.c}">${tr.a}</span></span>`;
 }
+// Netto-Ausrichtung aller Echtgeld-Positionen (gemeinsame Konten einmal). Nur Info: am 20.11. praereg. geprueft,
+// sie sagt die BTC-Richtung nicht voraus (Treffer 47-49 %, p 0,67/0,85) -- zeigt, wie einseitig alle Konten stehen.
+function netLine() {
+  let L = 0, S = 0;
+  allPositions().forEach((p) => { const n = Math.abs(p.notional || 0); if (p.side === 'short') S += n; else L += n; });
+  const g = L + S;
+  if (!g) return '<span class="lbl">Bots netto: keine offene Position</span>';
+  const lp = Math.round(L / g * 100), bal = Math.abs(L - S) / g < 0.2;
+  const txt = bal ? `ausgeglichen <small>(${lp} % long)</small>` : L > S ? `<b class="up">${lp} % long</b>` : `<b class="down">${100 - lp} % short</b>`;
+  return `<div class="netl"><span class="lbl">Bots netto: ${txt} · ${nf(g, 0)} USDT offen · nur Info</span>
+    <div class="lsbar" aria-hidden="true">${L ? `<i style="flex:${L};background:var(--up)"></i>` : ''}${S ? `<i style="flex:${S};background:var(--down)"></i>` : ''}</div></div>`;
+}
 // Kompakte Karte fuer die Uebersicht
 function drawBaroCard(box, d) {
   const e = d.echt, p = d.papier;
@@ -1223,7 +1235,7 @@ function drawBaroCard(box, d) {
       <div class="barot"><span class="lbl">${d.markt ? '<i class="lg" style="background:var(--text)"></i>' : ''}${e ? 'Bots Echtgeld' : 'Bots Papier'}</span><b style="color:var(${baroVar(main.score)})">${esc(main.label)}</b>
         <span class="mono">${nf(main.score, 0)} / 100</span><span class="${tr.c}">${tr.a} ${tr.t} <small class="muted">(vor 7 T ${nf(main.prev, 0)})</small></span>
         ${e && p ? `<span class="lbl">Papier: <b style="color:var(${baroVar(p.score)})">${esc(p.label)}</b> ${nf(p.score, 0)}</span>` : ''}
-        ${mktLine(d.markt)}</div></div></a>`;
+        ${mktLine(d.markt)}</div></div>${netLine()}</a>`;
 }
 // Ganze Seite: Gesamtzeiger, je Bot Bewertung, Tendenz, Gewicht, Empfehlung; antippen = Bausteine
 const baroOpen = new Set();
@@ -1259,6 +1271,7 @@ function drawBarometer(box, d) {
       <b>Vertrauen</b> wächst mit der Zahl der Trades und dem Alter der Daten. Bei wenig Daten wird die Leistung zur Mitte (50) gezogen. Ein neuer Bot steht deshalb zuerst auf „Veränderlich“.<br>
       <b>Gesundheit</b> gibt keine Pluspunkte, sie zieht nur ab: wenn der Bot steht, bei kritischen Alarmen oder wenn Live ≠ Backtest (bis −${nf(d.health_penalty * 100, 0)}). Ein stehender Bot zeigt höchstens 35.<br>
       <b>Oranger Zeiger</b> = öffentlicher Crypto Fear &amp; Greed Index (alternative.me), die Stimmung am Krypto-Markt, vor allem BTC. Er hat dieselbe Skala: 0–24 Extreme Angst, 25–49 Angst, 50 Neutral, 51–74 Gier, ab 75 Extreme Gier. Er fließt nicht in die Bewertung ein und dient nur zum Vergleich: Stehen die Bots schlechter als der Markt, oder ist einfach der ganze Markt schlecht? Neu einmal am Tag, im Verlauf als orange Linie.<br>
+      <b>Bots netto</b> (Karte in der Übersicht) = wie viel aller offenen Echtgeld-Positionen long bzw. short ist. Nur zur Info: Am 20.11. geprüft, sagt sie die BTC-Richtung nicht voraus (Treffer 47–49 %, Zufall). Sie zeigt aber, wie einseitig alle Konten gerade stehen.<br>
       <b>Gesamtzeiger</b> = Mittel der Bots, gewichtet mit Kapital × Vertrauen. Der gestrichelte Zeiger zeigt den Stand vor 7 Tagen, wie der Schleppzeiger an einem echten Barometer.<br>
       Skala: unter 20 Sturm · 20–40 Regen · 40–60 Veränderlich · 60–80 Schön · ab 80 Sehr schön. Wird alle 5 Minuten neu berechnet, zuletzt ${timeStr(d.ts * 1000)}.</div></div>`;
   box.querySelectorAll('.brow').forEach((row) => {
