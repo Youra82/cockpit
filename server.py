@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -30,6 +31,7 @@ from urllib.parse import parse_qs, urlparse
 import ccxt
 
 import activity
+import barometer
 import push
 import zonen
 
@@ -166,6 +168,47 @@ SWITCH_BOTS = {
 }
 
 
+# Neue Bots brauchen keinen Eintrag in SWITCH_BOTS: ein Bot erklaert sich selbst ueber <bot>/cockpit.json
+# ({"papier": "pfad/konto.json", "format": "std", "takt_min": 15, "ohne_sl": false, "echtgeld_standard": false,
+# "nur_papier": false}) oder wird erkannt an "echtgeld" in seiner settings.json + Papierkonto an einer der
+# ueblichen Stellen (gemeinsames papier.py). Neu erkannte Bots starten wie alle neuen ausgeblendet.
+PAPER_CANDIDATES = [os.path.join('artifacts', 'papier', 'konto.json'), os.path.join('data_papier', 'konto.json'),
+                    os.path.join('data', 'papier', 'konto.json')]
+PAPER_FORMATS = {'std', 'evo', 'listing', 'kbot'}
+
+
+def switch_for(name, path):
+    """Papier/Echtgeld-Schalter eines Bots: bekannte aus SWITCH_BOTS, sonst Selbstauskunft oder Erkennung (oben)."""
+    if name in SWITCH_BOTS:
+        return SWITCH_BOTS[name]
+    try:
+        with open(os.path.join(path, 'cockpit.json'), encoding='utf-8-sig') as f:
+            m = json.load(f)
+    except (OSError, ValueError):
+        m = None
+    rel = os.path.normpath(m['papier']) if isinstance(m, dict) and isinstance(m.get('papier'), str) else None
+    if rel and not os.path.isabs(rel) and not rel.startswith('..'):   # nur Dateien im Bot-Ordner
+        try:
+            cycle = max(1, int(m.get('takt_min', 15)))
+        except (TypeError, ValueError):
+            cycle = 15
+        return {'paper': rel, 'cycle': cycle,
+                'format': m.get('format') if m.get('format') in PAPER_FORMATS else 'std',
+                'default_live': bool(m.get('echtgeld_standard', False)), 'ohne_sl': bool(m.get('ohne_sl', False)),
+                'nur_papier': bool(m.get('nur_papier', False)), 'auto': True}
+    try:
+        with open(os.path.join(path, 'settings.json'), encoding='utf-8-sig') as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(st, dict) or not isinstance(st.get('echtgeld'), dict):
+        return None
+    for rel in PAPER_CANDIDATES:
+        if os.path.isfile(os.path.join(path, rel)):
+            return {'paper': rel, 'format': 'std', 'cycle': 15, 'default_live': False, 'ohne_sl': False, 'auto': True}
+    return None
+
+
 def bot_papier(path, sw):
     """True = Papiermodus laut <bot>/settings.json. Unlesbar -> Voreinstellung des Bots."""
     if sw.get('nur_papier'):
@@ -181,7 +224,7 @@ def bot_papier(path, sw):
 def apply_mode(b):
     """Schalter eines Bots anwenden: im Papiermodus zählt er wie ein Papierkonto (kein Bitget-Schlüssel, kein
     Gesamtkapital), im Echtgeldmodus wie jeder andere Bot mit Bitget-Konto."""
-    sw = SWITCH_BOTS.get(b['name'])
+    sw = b.get('sw')
     if not sw:
         return
     papier = bot_papier(b['path'], sw)
@@ -207,9 +250,11 @@ def discover_bots(cfg):
     except OSError:
         names = []
     for d in names:
-        if d not in found and d not in cfg['exclude'] and not d.startswith('.') \
-                and (os.path.isfile(os.path.join(root, d, 'secret.json'))
-                     or (d in SWITCH_BOTS and os.path.isfile(os.path.join(root, d, 'settings.json')))):
+        if d in found or d in cfg['exclude'] or d.startswith('.') or not os.path.isdir(os.path.join(root, d)):
+            continue
+        p = os.path.join(root, d)
+        if os.path.isfile(os.path.join(p, 'secret.json')) \
+                or (d in SWITCH_BOTS and os.path.isfile(os.path.join(p, 'settings.json'))) or switch_for(d, p):
             found[d] = {'name': d}                # Bots mit Schalter auch ohne secret.json (reiner Papierbetrieb)
     entries = list(found.values())
     for e in entries:
@@ -218,11 +263,11 @@ def discover_bots(cfg):
     for e in entries:
         acc = load_account(e['path'], e['name']) if os.path.isfile(os.path.join(e['path'], 'secret.json')) else None
         fp = hashlib.sha256(acc['apiKey'].encode()).hexdigest()[:12] if acc else None
-        sw = SWITCH_BOTS.get(e['name'])
+        sw = switch_for(e['name'], e['path'])
         cycle = (e.get('cycle_minutes') or cfg['cycle_minutes'].get(e['name']) or (sw or {}).get('cycle')
                  or cfg['default_cycle_minutes'])
         b = {'name': e['name'], 'path': e['path'], 'account': acc, 'fp': fp, 'cycle': cycle,
-             'account_live': acc, 'fp_live': fp}
+             'account_live': acc, 'fp_live': fp, 'sw': sw}
         apply_mode(b)
         bots.append(b)
     return bots
@@ -1456,6 +1501,8 @@ class App:
         self.public, self.candle_cache = None, {}
         self.market_cache, self.market_lock = {}, threading.Lock()
         self.zones_cache, self.zones_busy = {'ts': 0, 'coins': []}, threading.Lock()
+        self.baro_cache, self.baro_lock = {'ts': 0, 'data': None}, threading.Lock()
+        self.fng_cache = {'ok': 0, 'try': 0, 'data': None}
         sk = os.path.join(DATA, 'siri_key')
         if not os.path.isfile(sk):
             with open(sk, 'w') as f:
@@ -1704,6 +1751,101 @@ class App:
             rep.pop('html_path', None)
             out.append({'bot': b['name'], **rep})
         return out
+
+    def fear_greed(self):
+        """Oeffentlicher Crypto Fear & Greed Index (alternative.me, 0-100, taeglich neu) als zweiter Zeiger im
+        Botbarometer. Kein Schluessel, es wird nichts von hier mitgeschickt; hoechstens einmal pro Stunde abgefragt,
+        nach einem Fehler fruehestens nach 5 Minuten erneut (bis dahin der letzte Stand)."""
+        c, now = self.fng_cache, time.time()
+        if (c['data'] is not None and now - c['ok'] < 3600) or now - c['try'] < 300:
+            return c['data']
+        c['try'] = now
+        try:
+            req = urllib.request.Request('https://api.alternative.me/fng/?limit=31&format=json',
+                                         headers={'User-Agent': 'cockpit'})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                rows = json.load(r)['data']
+            vals = sorted((int(x['timestamp']), int(x['value'])) for x in rows)   # alt -> neu
+            names = {'Extreme Fear': 'Extreme Angst', 'Fear': 'Angst', 'Neutral': 'Neutral', 'Greed': 'Gier',
+                     'Extreme Greed': 'Extreme Gier'}
+            newest = max(rows, key=lambda x: int(x['timestamp']))
+            c['data'] = {'score': vals[-1][1], 'prev': vals[-8][1] if len(vals) >= 8 else vals[0][1],
+                         'hist': [v for _, v in vals], 'ts': vals[-1][0],
+                         'label': names.get(newest.get('value_classification'), newest.get('value_classification', ''))}
+            c['ok'] = now
+        except Exception as e:
+            log.warning('Fear & Greed Index nicht abrufbar: %s', e)
+        return c['data']
+
+    def barometer(self):
+        """Botbarometer: jeder angezeigte Bot (Echtgeld und Papier) automatisch bewertet, dazu das gewichtete
+        Gesamtbarometer. Keine feste Bot-Liste -- ein neu eingeblendeter Bot wird beim naechsten Abruf mitbewertet.
+        Rechnet hoechstens alle 5 Minuten neu (Rueckblick 30 Tage taeglich)."""
+        with self.baro_lock:
+            now = time.time()
+            if self.baro_cache['data'] is not None and now - self.baro_cache['ts'] < 300:
+                return self.baro_cache['data']
+            st = self.poller.snapshot()
+            items = {x['name']: x for x in st.get('bots', [])}
+            reports = {r['bot']: r for r in self.reports()}
+            crit = {}
+            for a in st.get('alerts', []):
+                if a.get('bot') and a['level'] == 'crit' and a['title'] != 'Bot läuft nicht' and not a.get('hidden'):
+                    crit[a['bot']] = crit.get(a['bot'], 0) + 1
+            groups = {}   # gleiches Konto (gemeinsamer API-Schluessel) nur einmal bewerten
+            for b in self.bots:
+                s = items.get(b['name'])
+                fp = b.get('pfp') if b.get('paper') else b['fp']
+                if s and fp:
+                    groups.setdefault(fp, []).append((b, s))
+            since_ms = int((now - 125 * 86400) * 1000)   # 90 Tage + 30 Tage Rueckblick + Puffer
+            rated = []
+            for fp, members in groups.items():
+                b, s = members[0]
+                paper = bool(b.get('paper'))
+                trades = self.store.closes([fp], since_ms)
+                if paper:
+                    curve = barometer.trade_curve(trades, s.get('equity'))
+                else:
+                    g = self.store.growth_points(fp)
+                    curve = g[0] if g else []
+                names = [m[0]['name'] for m in members]
+                running = any(m[1]['running'] for m in members)
+                health = barometer.health_score(running, sum(crit.get(n, 0) for n in names),
+                                                None if paper else reports.get(b['name']), now)
+                cur, hist = barometer.rate_bot(trades, curve, health, running, now)
+                comp = [{'k': k, 'name': barometer.NAMES[k], 'score': round(cur['comp'][k][0], 1) if k in cur['comp'] else None,
+                         'txt': cur['comp'][k][1] if k in cur['comp'] else 'noch keine Daten', 'w': barometer.WEIGHTS.get(k)}
+                        for k in (*barometer.PERF, 'gesundheit')]
+                pen = round(cur['comp']['gesundheit'][2], 1)
+                eq = (s.get('equity') or 0) / len(members)
+                for mb, ms in members:
+                    rated.append({
+                        'name': mb['name'], 'paper': paper, 'modus': ms.get('modus'), 'running': ms['running'],
+                        'score': round(cur['score'], 1), 'label': barometer.label(cur['score']),
+                        'prev': hist[-8] if len(hist) >= 8 else hist[0], 'hist': hist,
+                        'conf': round(cur['conf'], 2), 'n': cur['n'], 'days': round(cur['days'], 1),
+                        'equity': s.get('equity'), 'shared_with': [n for n in names if n != mb['name']],
+                        'advice': barometer.advice(cur['score'], cur['conf'], running, paper), 'comp': comp, 'pen': pen,
+                        # Gewicht im Gesamtbarometer: Kapital x Vertrauen (Papier: nur Vertrauen)
+                        'w': (0.1 + 0.9 * cur['conf']) * (1.0 if paper else max(eq, 0.0)),
+                    })
+            out = {'ts': now, 'weights': barometer.WEIGHTS, 'scale': barometer.SCALE, 'health_penalty': barometer.HEALTH_PENALTY}
+            for key, sel in (('echt', [r for r in rated if not r['paper']]), ('papier', [r for r in rated if r['paper']])):
+                tot = sum(r['w'] for r in sel)
+                for r in sel:
+                    r['w_pct'] = round(r['w'] / tot * 100, 1) if tot > 0 else 0.0
+                out[key] = barometer.combine(sel)
+            out['bots'] = sorted(rated, key=lambda r: -r['score'])
+            out['markt'] = self.fear_greed()   # oeffentliche BTC-/Krypto-Stimmung, gleiche Skala 0-100
+            # Eingeschaltet, aber ohne Konto (kein API-Schluessel / noch kein Papierkonto) -> nicht bewertbar
+            done = {r['name'] for r in rated}
+            out['unrated'] = [b['name'] for b in self.bots if b['name'] not in done]
+            # Auf diesem Rechner installiert, aber im Cockpit nicht eingeschaltet -> nicht bewertet (nur Hinweis)
+            out['inactive'] = [{'name': d['name'], 'new': d['new'], 'running': d['running'], 'paper': d['paper']}
+                               for d in st.get('detected', []) if not d['shown']]
+            self.baro_cache = {'ts': now, 'data': out}
+            return out
 
     def report_html(self, bot):
         b = next((x for x in self.bots if x['name'] == bot), None)
@@ -2044,6 +2186,8 @@ def make_handler(app):
                     return self.send_json({'error': f'{type(e).__name__}: {str(e)[:120]}'}, 502)
             if url.path == '/api/reports':
                 return self.send_json(app.reports())
+            if url.path == '/api/barometer':
+                return self.send_json(app.barometer())
             if url.path == '/api/report':
                 body = app.report_html(q.get('bot', ''))
                 if body is None:

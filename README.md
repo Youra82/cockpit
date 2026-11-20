@@ -15,7 +15,7 @@ Eine Web-App, die auf dem iPhone im Vollbild mit eigenem Symbol läuft, wie eine
 |---|---|
 | Übersicht | Gesamtkapital, realisiert heute + offen = zusammen, Kurve, Liste der Bots, **alle offenen Positionen** (Mini-Preisleiter, Abstand zum SL, Trailing-Start), **Worst Case** (alle Stops greifen / BTC-Szenario mit Beta) und **Funding-Uhr** |
 | Bot-Detail | Kontostand mit Kurve, offene Positionen mit **Preisleiter** (SL, Einstieg, Kurs, TP, Liquidation auf einer Achse), wartende Orders, letzte Trades, Gewinn und Verlust je Coin, Git-Version |
-| Auswertung | Ziel (in der App änderbar), **Monatsrückblick** zum Wischen, **Bot-Zeugnis** (Note A–E je Bot), **Bots gegen BTC halten**, **Ziel-Prognose**, **Gebühren-Spiegel**, **Marktphase** (BTC über/unter 50-Tage-Schnitt und wie deine Bots darin abschneiden), **Live gegen Backtest** (Ampel aus dem täglichen Check jedes Bots), Rückgang vom Höchststand, Bot-Rennen (alle starten bei 100), Kalender mit Gewinn pro Tag, Wasserfall Kursgewinn → Gebühren → Funding → Netto, jeder Trade als Punkt (Haltedauer × Ergebnis), Heatmap Wochentag × Uhrzeit, offene Positionen je Coin mit Long/Short, Gewinn je Coin und Bot, letzte Trades. Alle Grafiken antippbar |
+| Auswertung | Ziel (in der App änderbar), **Monatsrückblick** zum Wischen, **Botbarometer**-Link, **Bot-Zeugnis** (Note A–E je Bot), **Bots gegen BTC halten**, **Ziel-Prognose**, **Gebühren-Spiegel**, **Marktphase** (BTC über/unter 50-Tage-Schnitt und wie deine Bots darin abschneiden), **Live gegen Backtest** (Ampel aus dem täglichen Check jedes Bots), Rückgang vom Höchststand, Bot-Rennen (alle starten bei 100), Kalender mit Gewinn pro Tag, Wasserfall Kursgewinn → Gebühren → Funding → Netto, jeder Trade als Punkt (Haltedauer × Ergebnis), Heatmap Wochentag × Uhrzeit, offene Positionen je Coin mit Long/Short, Gewinn je Coin und Bot, letzte Trades. Alle Grafiken antippbar |
 | Trade | Jeder Trade in den Listen ist antippbar: Kerzenchart mit Einstieg und Ausstieg, Ergebnis, Gebühren, Funding |
 | Alarme | Bot läuft nicht, Position ohne Stop-Loss, Liquidation vor Stop-Loss, gleicher Coin in mehreren Bots (Klumpenrisiko), Bitget-Abfrage fehlgeschlagen. Darunter **Mitteilungen** (an/aus je Art) und die **Zeitleiste** der letzten 7 Tage: eröffnet, geschlossen, Stop verschoben, Ein-/Auszahlung, Alarm |
 | Server | Prozessor, RAM, Speicher, Laufzeit, Version und letzter Lauf jedes Bots. **Siri**: Adresse für einen Kurzbefehl „Wie stehen meine Bots?“ (eigener Lese-Schlüssel, gibt nur diesen einen Satz frei) |
@@ -44,6 +44,28 @@ Nein.
 Die API-Schlüssel kommen aus der `secret.json` des jeweiligen Bots. Nutzen zwei Bots denselben Schlüssel, erkennt das Cockpit das und zählt das Konto nur einmal.
 
 **Bots erkennen und ein-/ausblenden:** Das Cockpit findet jeden Bot-Ordner neben sich, der eine `secret.json` hat (alle 10 Minuten neu, also auch frisch installierte Bots), dazu Papierkonten wie evobot. Unter **System → Bots im Cockpit** schaltest du jeden Bot an oder aus. Ein ausgeblendeter Bot zählt nirgends mit: nicht im Gesamtkapital, nicht bei Positionen und Alarmen, nicht in der Auswertung. Er wird auch nicht bei Bitget abgefragt, außer du schaltest „Kritische Alarme ausgeblendeter Bots trotzdem melden“ ein. Neu gefundene Bots starten ausgeblendet. Gespeichert wird das in `data/bots.json`. Beim ersten Start sind die Bots aus `config.json` (und evobot) angezeigt, alle anderen ausgeblendet.
+
+**Neue Papier-Bots ohne Änderung am Cockpit:** Ein Bot mit `"echtgeld": {...}` in seiner `settings.json` und einem Papierkonto unter `artifacts/papier/konto.json`, `data_papier/konto.json` oder `data/papier/konto.json` (gemeinsames `papier.py`) wird automatisch als Papier/Echtgeld-Bot erkannt. Liegt das Konto woanders oder hat es ein anderes Format, legt der Bot eine `cockpit.json` in seinen Ordner:
+
+```json
+{"papier": "pfad/im/bot/konto.json", "format": "std", "takt_min": 15, "ohne_sl": false, "echtgeld_standard": false, "nur_papier": false}
+```
+
+`format`: `std` (papier.py), `evo`, `listing` oder `kbot`. Auch so erkannte Bots starten ausgeblendet und werden erst gezählt, wenn du sie unter System einschaltest.
+
+## Botbarometer
+
+Übersicht → Karte **Botbarometer** (ganze Seite unter `#/barometer`, auch über Auswertung → Bots). Bewertet wird jeder im Cockpit **eingeschaltete** Bot, Echtgeld wie Papier, mit 0–100 Punkten auf der Skala Sturm · Regen · Veränderlich · Schön · Sehr schön. Es gibt keine feste Bot-Liste: Ein neuer Bot wird mitbewertet, sobald er eingeschaltet ist.
+
+| Baustein | Gewicht | Woraus |
+|---|---|---|
+| Ertrag | 35 % | Rendite der letzten 30 Tage (Ein-/Auszahlungen herausgerechnet, jüngere Bots hochgerechnet) |
+| Kante | 30 % | t-Wert der Trade-Ergebnisse in 90 Tagen: echte Kante oder Zufall |
+| Risiko | 25 % | tiefster Rückgang vom Höchststand in 90 Tagen |
+| Kosten | 10 % | Gebühren und Funding im Verhältnis zum Kursgewinn (30 Tage) |
+| Gesundheit | nur Abzug | Bot steht, kritische Alarme, Live ≠ Backtest: bis −40, ein stehender Bot zeigt höchstens 35 |
+
+Alle Bausteine sind stufenlos, ohne feste Schwellen. **Vertrauen** (Zahl der Trades, Alter der Daten) zieht die Leistung bei wenig Daten zur Mitte (50). Ein neuer Bot steht deshalb zuerst auf „Veränderlich“. Der **Gesamtzeiger** mittelt die Bots, gewichtet mit Kapital × Vertrauen, Papier getrennt und nur nach Vertrauen. Der gestrichelte Schleppzeiger zeigt den Stand vor 7 Tagen. Je Bot gibt es Tendenz, Verlauf über 30 Tage, Gewicht und eine Kurzempfehlung. Gerechnet wird in `barometer.py` und neu höchstens alle 5 Minuten (`/api/barometer`).
 
 ## Installation auf dem VPS
 

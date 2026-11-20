@@ -537,3 +537,31 @@ a.kpi:active { transform: scale(.97); background: var(--soft); }
 .kpinav { gap: 4px; }
 .kpinav a { border-radius: 8px; padding: 7px 10px; font-size: 12px; font-weight: 600; color: var(--muted); text-decoration: none; min-height: 32px; display: inline-flex; align-items: center; }
 .kpinav a.on { background: #2A3140; color: var(--text); }
+
+/* Botbarometer */
+.barocard { gap: 6px; }
+.barorow { display: flex; align-items: center; gap: 14px; }
+.barorow .gauge { width: 150px; flex: none; height: auto; }
+.barorow.big .gauge { width: 190px; }
+.gauge .bl { font-size: 10px; fill: var(--muted); }
+.barot { display: flex; flex-direction: column; gap: 3px; min-width: 0; font-size: 13px; }
+.barot > b { font-size: 21px; font-weight: 700; letter-spacing: -0.3px; }
+.barot .mono { font-size: 15px; }
+.bspark { width: 60px; height: 24px; display: block; }
+.brow { display: grid; grid-template-columns: 40px minmax(0, 1fr) 60px 12px; gap: 10px; align-items: center; padding: 11px 0 11px 10px; border-bottom: 1px solid var(--line2); border-left: 3px solid var(--bc, var(--line)); cursor: pointer; }
+.brow:last-child { border-bottom: 0; }
+.brow:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.bsc { width: 40px; height: 34px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 16px; }
+.bt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.bt > span { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bt > span.muted { white-space: normal; }
+.bdet { grid-column: 1 / -1; display: grid; gap: 6px; font-size: 12px; color: var(--muted); line-height: 1.45; padding-top: 4px; }
+.bdet b { color: var(--text); }
+.bdet a { color: var(--accent); }
+.bcomp { display: grid; grid-template-columns: 92px minmax(0, 1fr) 26px; gap: 4px 8px; align-items: center; }
+.bcomp small { grid-column: 1 / -1; font-size: 11.5px; }
+.bcomp > span small { color: var(--dim); }
+.bcomp > b { text-align: right; }
+.bbar { height: 6px; border-radius: 3px; background: var(--soft); overflow: hidden; }
+.bbar i { display: block; height: 100%; border-radius: 3px; }
+@media (max-width: 360px) { .barorow .gauge { width: 128px; } .barorow.big .gauge { width: 150px; } }

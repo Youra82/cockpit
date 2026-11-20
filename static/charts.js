@@ -1159,3 +1159,129 @@ function drawKpiDetail(box, m, trades, pts) {
     <b class="mono ${w.v == null ? 'muted' : m === 'hold' ? '' : K.good(w.v) ? 'up' : 'down'}">${fmtV(w.v)}</b></div>`);
   box.querySelector('#kpitab').innerHTML = rows.length ? moreList(rows, 6) : '<div class="empty">Keine Wochen.</div>';
 }
+
+// ------------------------------------------------------------------ Botbarometer (Server: /api/barometer)
+// Wie ein Wetter-Barometer: Zeiger = Bewertung jetzt (0-100), gestrichelter Schleppzeiger = vor 7 Tagen.
+// Jeder im Cockpit eingeschaltete Bot wird automatisch bewertet -- auch neue, ohne Aenderung am Cockpit.
+const BARO_SEG = [[0, 20, '--down', 0.9], [20, 40, '--down', 0.45], [40, 60, '--warn', 0.7], [60, 80, '--up', 0.45], [80, 100, '--up', 0.9]];
+const baroVar = (s) => (s >= 60 ? '--up' : s >= 40 ? '--warn' : '--down');
+function baroTrend(cur, prev) {
+  const d = cur - prev;
+  return d >= 3 ? { a: '↗', t: 'steigt', c: 'up', d } : d <= -3 ? { a: '↘', t: 'fällt', c: 'down', d } : { a: '→', t: 'gleichbleibend', c: 'muted', d };
+}
+// mkt: oeffentlicher Fear & Greed Index (BTC-Stimmung) als oranger Zeiger auf derselben Skala
+function gaugeSvg(score, prev, label, mkt) {
+  const cx = 100, cy = 100, r = 84;
+  const P = (s, rr) => { const a = Math.PI * (1 - Math.max(0, Math.min(100, s)) / 100); return [cx + rr * Math.cos(a), cy - rr * Math.sin(a)]; };
+  const f = (v) => v.toFixed(1);
+  const arc = (a, b, rr) => { const [x0, y0] = P(a, rr), [x1, y1] = P(b, rr); return `M${f(x0)} ${f(y0)} A${rr} ${rr} 0 0 1 ${f(x1)} ${f(y1)}`; };
+  let s = BARO_SEG.map(([a, b, c, o]) => `<path d="${arc(a + 0.8, b - 0.8, r)}" stroke="var(${c})" stroke-opacity="${o}" stroke-width="12" fill="none"/>`).join('');
+  for (let v = 0; v <= 100; v += 10) {
+    const [x0, y0] = P(v, r - 14), [x1, y1] = P(v, r - (v % 50 ? 18 : 22));
+    s += `<line x1="${f(x0)}" y1="${f(y0)}" x2="${f(x1)}" y2="${f(y1)}" stroke="var(--dim)" stroke-width="${v % 50 ? 1 : 1.6}"/>`;
+  }
+  if (prev != null) { const [px, py] = P(prev, r - 8); s += `<line x1="${cx}" y1="${cy}" x2="${f(px)}" y2="${f(py)}" stroke="var(--muted)" stroke-width="1.6" stroke-dasharray="3 3"/>`; }
+  if (mkt) {
+    const [mx, my] = P(mkt.score, r - 26);
+    s += `<line x1="${cx}" y1="${cy}" x2="${f(mx)}" y2="${f(my)}" stroke="var(--btc)" stroke-width="2.4" stroke-linecap="round"/>
+      <circle cx="${f(mx)}" cy="${f(my)}" r="4.5" fill="var(--btc)"/>`;
+  }
+  const [nx, ny] = P(score, r - 20);
+  s += `<line x1="${cx}" y1="${cy}" x2="${f(nx)}" y2="${f(ny)}" stroke="var(--text)" stroke-width="3.2" stroke-linecap="round"/>
+    <circle cx="${cx}" cy="${cy}" r="7" fill="var(--text)"/><circle cx="${cx}" cy="${cy}" r="3" fill="var(${baroVar(score)})"/>
+    <text x="10" y="116" class="bl">Sturm</text><text x="190" y="116" class="bl" text-anchor="end">Sehr schön</text>`;
+  const al = mkt ? `${label} · BTC-Stimmung ${mkt.label} ${mkt.score}` : label;
+  return `<svg class="gauge" viewBox="0 0 200 120" role="img" aria-label="${esc(al)}">${s}</svg>`;
+}
+// Bewertung der letzten 30 Tage, feste Skala 0-100 mit Mittellinie 50; mh = BTC-Stimmung als orange Linie
+function baroSpark(hist, mh) {
+  const v = (hist || []).filter((x) => x != null);
+  if (v.length < 3) return '';
+  const y = (x) => (22 - x / 100 * 20).toFixed(1);
+  const d = v.map((x, i) => `${i ? 'L' : 'M'}${(1 + i / (v.length - 1) * 58).toFixed(1)} ${y(x)}`).join(' ');
+  const col = `var(${baroVar(v[v.length - 1])})`;
+  const m = (mh || []).filter((x) => x != null);
+  const md = m.length >= 3 ? m.map((x, i) => `${i ? 'L' : 'M'}${(1 + i / (m.length - 1) * 58).toFixed(1)} ${y(x)}`).join(' ') : '';
+  return `<svg viewBox="0 0 60 24" class="bspark" role="img" aria-label="Bewertung 30 Tage"><line x1="0" x2="60" y1="12" y2="12" stroke="var(--line)" stroke-dasharray="2 2"/>
+    ${md ? `<path d="${md}" fill="none" stroke="var(--btc)" stroke-width="1.2" stroke-opacity="0.8" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>` : ''}
+    <path d="${d}" fill="none" stroke="${col}" stroke-width="1.6" stroke-linejoin="round" vector-effect="non-scaling-stroke"/><circle cx="59" cy="${y(v[v.length - 1])}" r="2" fill="${col}"/></svg>`;
+}
+// Zeile "BTC-Stimmung" unter dem Bot-Wert (Legende fuer den orangen Zeiger)
+function mktLine(m) {
+  if (!m) return '';
+  const tr = baroTrend(m.score, m.prev);
+  return `<span class="lbl"><i class="lg" style="background:var(--btc)"></i>BTC <b style="color:var(--btc)">${esc(m.label)} ${m.score}</b> <span class="${tr.c}">${tr.a}</span></span>`;
+}
+// Kompakte Karte fuer die Uebersicht
+function drawBaroCard(box, d) {
+  const e = d.echt, p = d.papier;
+  if (!e && !p) { box.innerHTML = ''; return; }
+  const main = e || p, tr = baroTrend(main.score, main.prev);
+  box.innerHTML = `<a class="card barocard" href="#/barometer" aria-label="Botbarometer öffnen">
+    <div class="row2"><b>Botbarometer</b><span class="muted">${d.bots.length} Bots bewertet ›</span></div>
+    <div class="barorow">${gaugeSvg(main.score, main.prev, `Botbarometer ${main.label}`, d.markt)}
+      <div class="barot"><span class="lbl">${d.markt ? '<i class="lg" style="background:var(--text)"></i>' : ''}${e ? 'Bots Echtgeld' : 'Bots Papier'}</span><b style="color:var(${baroVar(main.score)})">${esc(main.label)}</b>
+        <span class="mono">${nf(main.score, 0)} / 100</span><span class="${tr.c}">${tr.a} ${tr.t} <small class="muted">(vor 7 T ${nf(main.prev, 0)})</small></span>
+        ${e && p ? `<span class="lbl">Papier: <b style="color:var(${baroVar(p.score)})">${esc(p.label)}</b> ${nf(p.score, 0)}</span>` : ''}
+        ${mktLine(d.markt)}</div></div></a>`;
+}
+// Ganze Seite: Gesamtzeiger, je Bot Bewertung, Tendenz, Gewicht, Empfehlung; antippen = Bausteine
+const baroOpen = new Set();
+// Bots im Verhaeltnis zur Marktstimmung: schlechte Bot-Werte bei Angst im Markt sind anders zu lesen als bei Gier
+function mktCompare(bots, mkt) {
+  const diff = bots - mkt;
+  return Math.abs(diff) < 10 ? `Die Bots stehen etwa so wie die Marktstimmung (${nf(bots, 0)} zu ${mkt}).`
+    : diff > 0 ? `Die Bots stehen <b class="up">${nf(diff, 0)} Punkte besser</b> als die Marktstimmung (${nf(bots, 0)} zu ${mkt}).`
+      : `Die Bots stehen <b class="down">${nf(-diff, 0)} Punkte schlechter</b> als die Marktstimmung (${nf(bots, 0)} zu ${mkt}).`;
+}
+function drawBarometer(box, d) {
+  const sec = (title, sub, tot, list) => {
+    if (!list.length) return '';
+    const tr = tot ? baroTrend(tot.score, tot.prev) : null;
+    return `<h2>${title} <small>${sub}</small></h2>
+    ${tot ? `<div class="card"><div class="barorow big">${gaugeSvg(tot.score, tot.prev, `${title}: ${tot.label}`, d.markt)}
+      <div class="barot">${d.markt ? '<span class="lbl"><i class="lg" style="background:var(--text)"></i>Bots</span>' : ''}<b style="color:var(${baroVar(tot.score)})">${esc(tot.label)}</b><span class="mono">${nf(tot.score, 0)} / 100</span>
+      <span class="${tr.c}">${tr.a} ${tr.t} <small class="muted">vor 7 T ${nf(tot.prev, 0)}</small></span>${mktLine(d.markt)}
+      <span class="bsp">${baroSpark(tot.hist, d.markt && d.markt.hist)}</span></div></div>
+      ${d.markt ? `<div class="lbl">${mktCompare(tot.score, d.markt.score)}</div>` : ''}</div>` : ''}
+    <div class="card tight">${list.map(baroRow).join('')}</div>`;
+  };
+  const echt = d.bots.filter((b) => !b.paper), paper = d.bots.filter((b) => b.paper);
+  const inact = (d.inactive || []).filter((x) => x.running), unr = d.unrated || [];
+  box.innerHTML = (d.bots.length ? '' : '<div class="card"><div class="empty">Keine eingeschalteten Bots mit Daten.</div></div>')
+    + sec('Echtgeld', 'Gewicht = Kapital × Vertrauen', d.echt, echt)
+    + sec('Papier', 'Gewicht = Vertrauen · zählt nicht zum Echtgeld', d.papier, paper)
+    + (unr.length ? `<div class="hint"><span class="grow">Eingeschaltet, aber ohne Kontodaten (kein API-Schlüssel oder noch kein Papierkonto): ${unr.map(esc).join(', ')}</span></div>` : '')
+    + (inact.length ? `<a class="hint" href="#/system"><span class="grow">Läuft, aber im Cockpit ausgeschaltet und daher nicht bewertet: ${inact.map((x) => esc(x.name)).join(', ')}</span><b>einschalten ›</b></a>` : '')
+    + `<h2>So rechnet das Barometer</h2><div class="card"><div class="q" style="display:block">
+      Jeder im Cockpit eingeschaltete Bot (Echtgeld und Papier) wird aus seinen eigenen Daten bewertet: geschlossene Trades, Kontoverlauf (Ein- und Auszahlungen herausgerechnet), Laufstatus, Alarme und Live-gegen-Backtest-Bericht. Einen neuen Bot bewertet es automatisch mit, sobald du ihn unter System einschaltest. Am Cockpit selbst muss dafür nichts geändert werden.<br><br>
+      <b>Leistung</b> (stufenlos, je 0–100): Ertrag in 30 Tagen (${d.weights.ertrag} %) · Kante = t-Wert der Trades in 90 Tagen, also echte Kante oder Zufall (${d.weights.edge} %) · Risiko = tiefster Rückgang in 90 Tagen (${d.weights.risiko} %) · Kosten = Gebühren und Funding im Verhältnis zum Kursgewinn (${d.weights.kosten} %).<br>
+      <b>Vertrauen</b> wächst mit der Zahl der Trades und dem Alter der Daten. Bei wenig Daten wird die Leistung zur Mitte (50) gezogen. Ein neuer Bot steht deshalb zuerst auf „Veränderlich“.<br>
+      <b>Gesundheit</b> gibt keine Pluspunkte, sie zieht nur ab: wenn der Bot steht, bei kritischen Alarmen oder wenn Live ≠ Backtest (bis −${nf(d.health_penalty * 100, 0)}). Ein stehender Bot zeigt höchstens 35.<br>
+      <b>Oranger Zeiger</b> = öffentlicher Crypto Fear &amp; Greed Index (alternative.me), die Stimmung am Krypto-Markt, vor allem BTC. Er hat dieselbe Skala: 0–24 Extreme Angst, 25–49 Angst, 50 Neutral, 51–74 Gier, ab 75 Extreme Gier. Er fließt nicht in die Bewertung ein und dient nur zum Vergleich: Stehen die Bots schlechter als der Markt, oder ist einfach der ganze Markt schlecht? Neu einmal am Tag, im Verlauf als orange Linie.<br>
+      <b>Gesamtzeiger</b> = Mittel der Bots, gewichtet mit Kapital × Vertrauen. Der gestrichelte Zeiger zeigt den Stand vor 7 Tagen, wie der Schleppzeiger an einem echten Barometer.<br>
+      Skala: unter 20 Sturm · 20–40 Regen · 40–60 Veränderlich · 60–80 Schön · ab 80 Sehr schön. Wird alle 5 Minuten neu berechnet, zuletzt ${timeStr(d.ts * 1000)}.</div></div>`;
+  box.querySelectorAll('.brow').forEach((row) => {
+    const t = (e) => {
+      if (e && e.target.closest('a')) return;
+      const n = row.dataset.bot; baroOpen.has(n) ? baroOpen.delete(n) : baroOpen.add(n); drawBarometer(box, d);
+    };
+    row.addEventListener('click', t);
+    row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); t(); } });
+  });
+}
+function baroRow(b) {
+  const open = baroOpen.has(b.name), tr = baroTrend(b.score, b.prev), c = baroVar(b.score);
+  const bar = (x) => (x.score == null ? '<div class="bbar"></div>' : `<div class="bbar"><i style="width:${x.score}%;background:var(${baroVar(x.score)})"></i></div>`);
+  return `<div class="brow" role="button" tabindex="0" data-bot="${esc(b.name)}" aria-expanded="${open}" style="--bc:${botColor(b.name)}">
+    <span class="bsc mono" style="color:var(${c});background:color-mix(in srgb, var(${c}) 16%, transparent)">${nf(b.score, 0)}</span>
+    <div class="bt"><b>${esc(b.name)}${b.running ? '' : ' <span class="pill crit">steht</span>'}</b>
+      <span><b style="color:var(${c})">${esc(b.label)}</b> · <span class="${tr.c}">${tr.a} ${tr.t}</span></span>
+      <span class="muted">${esc(b.advice)} · Gewicht ${nf(b.w_pct, 0)} %</span></div>
+    <span class="bsp">${baroSpark(b.hist)}</span><span class="muted">${open ? '▾' : '›'}</span>
+    ${open ? `<div class="bdet">
+      ${b.comp.map((x) => `<div class="bcomp"><span>${esc(x.name)}${x.w ? ` <small>${x.w} %</small>` : ''}</span>${bar(x)}<b class="mono">${x.score == null ? '—' : nf(x.score, 0)}</b><small>${esc(x.txt)}</small></div>`).join('')}
+      <div>Vertrauen <b>${nf(b.conf * 100, 0)} %</b> · ${b.n} Trades in 90 Tagen · Daten seit ${nf(b.days, 0)} Tagen${b.pen > 0 ? ` · Gesundheit zieht <b class="down">−${nf(b.pen, 0)}</b> ab` : ''}</div>
+      <div>Vor 7 Tagen ${nf(b.prev, 0)} → jetzt ${nf(b.score, 0)} (<span class="${tr.c}">${signed(tr.d, 0)}</span>)${b.shared_with.length ? ` · teilt das Konto mit ${b.shared_with.map(esc).join(', ')}` : ''}</div>
+      <a href="#/bot/${encodeURIComponent(b.name)}">Bot öffnen ›</a></div>` : ''}</div>`;
+}

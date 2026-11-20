@@ -591,6 +591,7 @@ function viewHome() {
     <div class="tile"><span class="lbl">Positionen</span><b>${t.positions}</b></div>
     <div class="tile"><span class="lbl">Trades heute</span><b>${t.trades}</b></div>
   </div>
+  <div id="barobox"></div>
   <div class="h2row"><div><b>Meine Bots</b><span class="lbl">heute realisiert + offen</span></div>${sortSeg()}</div>
   ${bots.map(botRow).join('')}
   ${nh ? `<a class="hint" href="#/system"><span class="grow">${nh} weitere${nh > 1 ? '' : 'r'} Bot${nh > 1 ? 's' : ''} erkannt, ausgeblendet</span><b>System ›</b></a>` : ''}
@@ -627,6 +628,7 @@ function viewPaper(b) {
   const dt = (ms) => ms ? new Date(ms).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
   const was = { 'befördert': 'befördert', 'herabgestuft': 'herabgestuft', 'ausgestorben': 'ausgestorben' };
   return `${header(esc(b.name), `<span class="dot ${b.running ? 'on' : 'off'}" style="display:inline-block;width:8px;height:8px;margin-right:6px"></span>Papierkonto · ${b.running ? 'läuft' : 'steht'} · ${ago(b.last_activity)}`, true)}
+  <div class="chips" id="barochip"></div>
   ${b.error ? `<div class="note">${b.error.startsWith('noch kein') ? '' : 'Papierkonto nicht lesbar: '}${esc(b.error)}</div>` : ''}
   <div class="note">${p.live ? 'Echtgeld-Modus' : 'Papierhandel mit echten Bitget-Kursen – kein echtes Geld, zählt nicht zum Gesamtkapital.'}
     ${['1mbot', 'kbot'].includes(b.name) ? `Der ${esc(b.name)} handelt nur auf Papier (keine Order-Funktionen).` : `Umschalten in <span class="mono">${esc(b.name)}/settings.json</span>: <span class="mono">"echtgeld": {"aktiv": true}</span> – das Cockpit zeigt dann das Bitget-Konto.`}
@@ -714,13 +716,10 @@ function viewBot(name) {
   ${b.git ? `<div class="lbl" style="text-align:center">Version ${esc(b.git.hash)} · ${esc(b.git.subject)}</div>` : ''}`;
 }
 
-// Kopf der Bot-Seite: Note aus dem Zeugnis, Ampel Live gegen Backtest, Version
+// Kopf der Bot-Seite: Ampel Live gegen Backtest, Version (die Bewertung kommt vom Botbarometer, baroChip)
 function drawBotChips(box, b, trades, race, reports) {
-  const it = gradeItems([b], trades, race, reports)[0];
   const rep = reportInfo(reports.find((x) => x.bot === b.name) || {});
-  const gc = it ? { A: '--up', B: '--up', C: '--warn', D: '--down', E: '--down' }[it.grade] : null;
-  box.innerHTML = `${it ? `<a class="chip" href="#/auswertung" style="color:var(${gc})" data-atabgo="bots">Note ${it.grade} <small class="mono">${it.pts}/100</small></a>` : ''}
-    <span class="chip"><span class="lamp ${rep.lamp}"></span>${rep.short}</span>
+  box.innerHTML = `<span class="chip"><span class="lamp ${rep.lamp}"></span>${rep.short}</span>
     ${b.git ? `<span class="chip mono">${esc(b.git.hash)}</span>` : ''}`;
 }
 
@@ -815,6 +814,20 @@ function viewAlerts() {
   ${grp('al_seen', 'Gesehen', 'info', seen, true, true)}
   ${fold('al_tl', 'Was ist passiert?', 'letzte 7 Tage', `<div class="card" id="timeline">${SKEL}</div>`)}
   <div class="lbl" style="text-align:center">Geprüft: Bot läuft, Stop-Loss vorhanden, Abstand zur Liquidation, gleiche Coins in mehreren Bots, Orders ohne Position, Bitget erreichbar. Mitteilungen einstellen: unter System.</div>`;
+}
+
+function viewBaro() {
+  return `${header('Botbarometer', 'alle im Cockpit eingeschalteten Bots', true)}
+  <div id="baro" style="display:flex;flex-direction:column;gap:14px"><div class="card">${SKEL}</div></div>`;
+}
+// Chip "Barometer 64 Schön ↗" auf der Bot-Seite (Echtgeld und Papier)
+function baroChip(box, name) {
+  cachedApi('/api/barometer', 120000).then((d) => {
+    const x = (d.bots || []).find((b) => b.name === name);
+    if (!x || !box.isConnected) return;
+    const tr = baroTrend(x.score, x.prev);
+    box.insertAdjacentHTML('afterbegin', `<a class="chip" href="#/barometer" style="color:var(${baroVar(x.score)})">Barometer ${nf(x.score, 0)} · ${esc(x.label)} <span class="${tr.c}">${tr.a}</span></a>`);
+  }).catch(() => {});
 }
 
 function viewTrade(pid) {
@@ -951,7 +964,9 @@ function groupBody(g, d) {
   ${viz('vizY', 'Gewinn pro Tag', '26 Wochen', 'Jedes Kästchen ein Tag (grün Gewinn, rot Verlust), darunter die Wochensumme. So siehst du gute und schlechte Phasen über ein halbes Jahr. Kästchen antippen zeigt Tag und Betrag.')}
   ${viz('vizA', 'Rückgang vom Höchststand', '90 Tage', 'Wie tief liege ich unter meinem besten Stand, und wie lange hat die Erholung gedauert?')}
   ${viz('vizP', 'Ziel-Prognose', 'bei gleichem Tempo', 'Wann wäre das Ziel erreicht, wenn es so weitergeht wie zuletzt?')}`;
-  if (g === 'bots') return `${viz('vizS', 'Zeugnis &amp; Live gegen Backtest', 'Note je Bot', 'Welcher Bot läuft gut, welcher braucht Aufmerksamkeit? Die Note setzt sich aus Laufen, Live gegen Backtest, Gewinn, Rückgang und Gebühren zusammen. Zeile antippen zeigt die Begründung und den täglichen Live-Check des Bots.')}
+  if (g === 'bots') return `<a class="card zlink" href="#/barometer"><div class="row2"><b>Botbarometer</b><span class="muted">öffnen ›</span></div>
+    <span class="lbl">Alle eingeschalteten Bots automatisch bewertet und gewichtet, Echtgeld und Papier</span></a>
+  ${viz('vizS', 'Zeugnis &amp; Live gegen Backtest', 'Note je Bot', 'Welcher Bot läuft gut, welcher braucht Aufmerksamkeit? Die Note setzt sich aus Laufen, Live gegen Backtest, Gewinn, Rückgang und Gebühren zusammen. Zeile antippen zeigt die Begründung und den täglichen Live-Check des Bots.')}
   ${viz('vizB', 'Bot-Rennen', 'Start = 100', 'Welcher Bot entwickelt sich am besten, egal wie viel Geld auf seinem Konto liegt? Ein- und Auszahlungen zählen nicht als Gewinn oder Verlust: Sie sind herausgerechnet und mit einem kleinen Dreieck markiert (▲ Einzahlung, ▼ Auszahlung).')}
   ${viz('vizK', 'Welche Coins bringen Geld?', '90 Tage', 'Gewinn und Verlust je Coin, für jeden Bot einzeln.')}
   ${viz('vizU', 'Gebühren-Spiegel', '30 Tage', 'Wie viel zahlt jeder Bot an Gebühren, und wie viel wäre mit Limit-Orders sparbar?')}`;
@@ -1223,7 +1238,7 @@ async function render() {
   if (!state) return;
   const r = route();
   tabs.hidden = false;
-  const tab = { bot: 'home', trade: 'home', kpi: 'home', zonen: 'auswertung' }[r.name] || r.name;
+  const tab = { bot: 'home', trade: 'home', kpi: 'home', barometer: 'home', zonen: 'auswertung' }[r.name] || r.name;
   for (const a of tabs.querySelectorAll('a')) a.classList.toggle('on', a.dataset.tab === tab);
   const badge = document.getElementById('badge');
   const crit = groupAlerts(liveAlerts().filter((a) => a.level !== 'info')).length;
@@ -1231,7 +1246,8 @@ async function render() {
 
   const html = r.name === 'bot' ? viewBot(r.arg) : r.name === 'trade' ? viewTrade(r.arg) : r.name === 'alarme' ? viewAlerts()
     : r.name === 'auswertung' ? viewStats() : r.name === 'system' ? viewSystem() : r.name === 'zonen' ? viewZones()
-      : r.name === 'positionen' ? viewPositions() : r.name === 'kpi' ? viewKpi(r.arg, r.arg2) : viewHome();
+      : r.name === 'positionen' ? viewPositions() : r.name === 'kpi' ? viewKpi(r.arg, r.arg2)
+        : r.name === 'barometer' ? viewBaro() : viewHome();
   app.innerHTML = html;
   updateMinibar();
   flashChanges();
@@ -1273,6 +1289,7 @@ async function render() {
         const ab = document.getElementById('actbox'); if (ab) drawActivityCard(ab, a);
         app.querySelectorAll('[data-act]').forEach((s) => { s.innerHTML = actPill(a, s.dataset.act); });
       }).catch(() => {});
+      cachedApi('/api/barometer', 120000).then((d) => { const bx = document.getElementById('barobox'); if (bx) drawBaroCard(bx, d); }).catch(() => {});
       const sbx = document.getElementById('sincebox');
       if (sbx) cachedApi(`/api/since?ts=${sinceTs}`, 60000).then((d) => { if (sbx.isConnected) drawSince(sbx, d); }).catch(() => sbx.remove());
       // Kurve + Markierungen (Trades, Ein-/Auszahlungen, heute inkl. offen) und Mini-Kurven je Bot
@@ -1282,6 +1299,9 @@ async function render() {
       const ex = { trades, transfers, open };
       const el = document.getElementById('homechart'); if (el) { el.innerHTML = chartWithSummary(pts, ex); bindScrub(el, pts, ex); }
       (race?.bots || []).forEach((s) => { const sp = app.querySelector(`[data-spark="${CSS.escape(s.name)}"]`); if (sp) sp.innerHTML = sparkSvg(s.v); });
+    } else if (r.name === 'barometer') {
+      const d = await cachedApi('/api/barometer', 120000);
+      const el = document.getElementById('baro'); if (el) drawBarometer(el, d);
     } else if (r.name === 'positionen') {
       const ex = document.getElementById('expo'); if (ex) drawExposure(ex, state.bots);
       const market = await api('/api/market').catch(() => null);
@@ -1290,6 +1310,7 @@ async function render() {
     } else if (r.name === 'bot') {
       const b = state.bots.find((x) => x.name === r.arg);
       if (!b) return;
+      const pcx = document.getElementById('barochip'); if (pcx) baroChip(pcx, b.name);
       const enc = encodeURIComponent(r.arg);
       const [pts, st, trades, tradesAll, race, reports, transfers, open, teams] = await Promise.all([eq(r.arg), api(`/api/stats?bot=${enc}`),
         cachedApi('/api/trades?x=1' + paperQ(b) + fromQ()), cachedApi('/api/trades?x=1' + paperQ(b)), b.paper ? null : cachedApi('/api/race?range=Alles', 300000),
@@ -1310,6 +1331,7 @@ async function render() {
       const ch = document.getElementById('botchips');
       if (ch) {
         drawBotChips(ch, b, tradesAll, race, reports);
+        baroChip(ch, b.name);
         // Laeuft gerade etwas fuer diesen Bot (Masterrunner, Optimierung, Backtest ...)?
         api('/api/activity').then((a) => { const g = actOf(a, b.name)[0]; if (g && ch.isConnected) ch.insertAdjacentHTML('afterbegin', `<span class="chip">${actPill(a, b.name)} seit ${durTxt(Date.now() / 1000 - g.start)}</span>`); }).catch(() => {});
       }
