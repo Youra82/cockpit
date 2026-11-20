@@ -1304,8 +1304,17 @@ async function render() {
       const el = document.getElementById('baro'); if (el) drawBarometer(el, d);
     } else if (r.name === 'positionen') {
       const ex = document.getElementById('expo'); if (ex) drawExposure(ex, state.bots);
-      const market = await api('/api/market').catch(() => null);
-      const w = document.getElementById('worst'); if (w) drawWorst(w, allPositions(), market, totals(state.bots).equity);
+      const [market, scen] = await Promise.all([api('/api/market').catch(() => null), cachedApi('/api/scenario', 600000).catch(() => null)]);
+      const w = document.getElementById('worst'); if (w) drawWorst(w, allPositions(), market, totals(state.bots).equity, scen);
+      // Kursgeschichte laedt noch (erster Start, neuer Coin): nur den Worst-Case-Kasten alle 20 s neu zeichnen
+      if (scen?.laedt) {
+        delete apiCache['/api/scenario'];
+        setTimeout(async () => {
+          if (route().name !== 'positionen') return;
+          const s2 = await api('/api/scenario').catch(() => null), w2 = document.getElementById('worst');
+          if (w2 && s2) { if (!s2.laedt) apiCache['/api/scenario'] = { t: Date.now(), d: s2 }; drawWorst(w2, allPositions(), market, totals(state.bots).equity, s2); }
+        }, 20000);
+      }
       const f = document.getElementById('funding'); if (f) drawFunding(f, allPositions(), market);
     } else if (r.name === 'bot') {
       const b = state.bots.find((x) => x.name === r.arg);

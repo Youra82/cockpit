@@ -629,7 +629,8 @@ function drawPositions(box, rows, withBot, limit) {
 
 // ------------------------------------------------------------------ N: Worst-Case (alle SL greifen / BTC-Szenario)
 let worstMove = -5;
-function drawWorst(box, rows, market, equity) {
+// scen: /api/scenario -- echte Tagesbewegungen (Schluss/Tief/Hoch) von BTC und den offenen Coins seit 2020
+function drawWorst(box, rows, market, equity, scen) {
   if (!rows.length) return tooFew(box, 'Keine offene Position.');
   const dir = (p) => (p.side === 'short' ? -1 : 1);
   const atStop = (p) => (p.sl ? (p.sl - p.entry) * p.size * dir(p) : -(p.margin || 0));  // ohne SL: Margin weg (Liquidation)
@@ -645,21 +646,60 @@ function drawWorst(box, rows, market, equity) {
         <span class="mono ${cls(v)}">${signed(v)}</span></div>`).join('')}</div></div>
     <div class="nbox"><div class="row2"><span class="lbl">Szenario: BTC bewegt sich um</span><b class="mono" id="wv"></b></div>
       <input type="range" id="wslider" min="-20" max="20" step="1" value="${worstMove}" aria-label="BTC-Bewegung in Prozent">
-      <div class="row2"><span>Offenes Ergebnis danach (geschätzt)</span><b class="mono" id="wres"></b></div><span class="lbl" id="whit"></span></div>
-    <div class="lbl">Ohne Gebühren gerechnet. Szenario: Jeder Coin bewegt sich wie BTC mal seinem Beta der letzten 30 Tage${market ? '' : ' (Marktdaten fehlen, Beta = 1)'}.</div>`;
+      <div class="row2"><span>Ähnliche echte Tage (Median)</span><b class="mono" id="wres"></b></div>
+      <span class="lbl" id="wspan"></span><span class="lbl" id="wworst"></span>
+      <div class="row2" style="margin-top:4px"><span class="muted">Modell (Beta)</span><b class="mono" id="wmod"></b></div><span class="lbl" id="whit"></span></div>
+    <div class="lbl" id="wnote"></div>`;
   const sl = box.querySelector('#wslider');
-  const upd = () => {
-    worstMove = Number(sl.value);
-    let res = 0, hits = [];
+  const T = scen?.t || [], B = scen?.btc || [];
+  const betaOf = (sym, m) => { const b = scen?.beta?.[sym]; return (m < 0 ? b?.down : b?.up) ?? market?.beta?.[sym] ?? 1; };
+  const tag = (p) => `${coin(p.symbol).split('/')[0]} (${p.bot})`;
+  // Ergebnis aller offenen Positionen, wenn sich jeder Coin um (Schluss, Tief, Hoch) % bewegt
+  const play = (mv) => {
+    let res = 0; const hits = [];
     rows.forEach((p) => {
-      const beta = market?.beta?.[p.symbol] ?? 1, np = p.mark * (1 + worstMove / 100 * beta);
-      const hitSl = p.sl && (dir(p) > 0 ? np <= p.sl : np >= p.sl), hitLiq = !p.sl && p.liq && (dir(p) > 0 ? np <= p.liq : np >= p.liq);
-      if (hitSl || hitLiq) { res += atStop(p); hits.push(`${coin(p.symbol).split('/')[0]} (${p.bot})`); } else res += (np - p.entry) * p.size * dir(p);
+      const [c, lo, hi] = mv(p), worst = p.mark * (1 + (dir(p) > 0 ? lo : hi) / 100), np = p.mark * (1 + c / 100);
+      const hitSl = p.sl && (dir(p) > 0 ? worst <= p.sl : worst >= p.sl), hitLiq = !p.sl && p.liq && (dir(p) > 0 ? worst <= p.liq : worst >= p.liq);
+      if (hitSl || hitLiq) { res += atStop(p); hits.push(tag(p)); } else res += (np - p.entry) * p.size * dir(p);
     });
-    box.querySelector('#wv').textContent = `${worstMove > 0 ? '+' : ''}${worstMove} %`;
-    box.querySelector('#wv').className = `mono ${cls(worstMove)}`;
-    box.querySelector('#wres').innerHTML = `<span class="${cls(res)}">${signed(res)} USDT</span> <span class="muted">(${signed(res - now)})</span>`;
-    box.querySelector('#whit').textContent = hits.length ? `Dabei würden ${hits.length} Stops greifen: ${hits.join(', ')}.` : 'Dabei würde kein Stop greifen.';
+    return { res, hits };
+  };
+  const fmtD = (ms) => new Date(ms).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  const upd = () => {
+    const m = worstMove = Number(sl.value);
+    box.querySelector('#wv').textContent = `${m > 0 ? '+' : ''}${m} %`;
+    box.querySelector('#wv').className = `mono ${cls(m)}`;
+    // Modell: Beta getrennt nach BTC faellt / steigt (2 Jahre), sonst 30 Tage, sonst 1
+    const mod = play((p) => { const r = m * betaOf(p.symbol, m); return [r, r, r]; });
+    box.querySelector('#wmod').innerHTML = `<span class="${cls(mod.res)}">${signed(mod.res)} USDT</span>`;
+    box.querySelector('#whit').textContent = mod.hits.length ? `Modell: ${mod.hits.length} Stops greifen (${mod.hits.join(', ')}).` : 'Modell: kein Stop greift.';
+    // Echte Tage: BTC lief aehnlich (± 15 %, mindestens ± 1 Punkt), wenigstens die 8 naechsten
+    if (!T.length) {
+      box.querySelector('#wres').innerHTML = '<span class="muted">—</span>';
+      box.querySelector('#wspan').textContent = scen?.laedt ? 'Kursgeschichte seit 2020 wird geladen … (beim ersten Mal ein paar Minuten)' : 'Keine Kursgeschichte verfügbar.';
+      box.querySelector('#wworst').textContent = '';
+      return;
+    }
+    const w = Math.max(1, Math.abs(m) * 0.15);
+    let idx = B.map((r, i) => i).filter((i) => Math.abs(B[i] - m) <= w);
+    if (idx.length < 8) idx = B.map((r, i) => i).sort((a, b) => Math.abs(B[a] - m) - Math.abs(B[b] - m)).slice(0, 8);
+    const fb = new Set();
+    const out = idx.map((i) => ({ i, ...play((p) => {
+      const c = scen.coins?.[p.symbol];
+      if (c && c.c[i] != null) return [c.c[i], c.l[i], c.h[i]];
+      fb.add(coin(p.symbol).split('/')[0]); const r = B[i] * betaOf(p.symbol, B[i]); return [r, r, r];
+    }) })).sort((a, b) => a.res - b.res);
+    const q = (f) => out[Math.min(out.length - 1, Math.max(0, Math.round(f * (out.length - 1))))].res;
+    const med = q(0.5), lo = Math.min(...idx.map((i) => B[i])), hi = Math.max(...idx.map((i) => B[i]));
+    box.querySelector('#wres').innerHTML = `<span class="${cls(med)}">${signed(med)} USDT</span> <span class="muted">(${signed(med - now)})</span>`;
+    box.querySelector('#wspan').innerHTML = `${out.length} Tage seit ${new Date(T[0]).getFullYear()} mit BTC ${signed(lo, 1)} bis ${signed(hi, 1)} %: `
+      + (out.length >= 10 ? `in 8 von 10 Fällen zwischen <b class="${cls(q(0.1))}">${signed(q(0.1))}</b> und <b class="${cls(q(0.9))}">${signed(q(0.9))}</b> USDT`
+        : `Spanne <b class="${cls(out[0].res)}">${signed(out[0].res)}</b> bis <b class="${cls(out[out.length - 1].res)}">${signed(out[out.length - 1].res)}</b> USDT`);
+    const wd = out[0];
+    box.querySelector('#wworst').innerHTML = `Schlechtester davon: ${fmtD(T[wd.i])} (BTC ${signed(B[wd.i], 1)} %) <b class="${cls(wd.res)}">${signed(wd.res)} USDT</b>`
+      + (wd.hits.length ? ` · Stops: ${esc(wd.hits.join(', '))}` : ' · kein Stop');
+    box.querySelector('#wnote').innerHTML = `Ähnliche Tage = echte Tagesbewegung jedes deiner Coins an Tagen, an denen BTC ähnlich stark lief (Bitget-Tageskerzen seit ${new Date(T[0]).getFullYear()}). Darin stecken Eigenbewegungen und dass im Crash alles zusammen fällt. Stops zählen schon, wenn das Tagestief bzw. -hoch sie erreicht.
+      Modell = Beta getrennt für BTC fällt / steigt (2 Jahre). ${fb.size ? `Ohne Geschichte an manchen Tagen, dort Modell: ${esc([...fb].join(', '))}. ` : ''}Ohne Gebühren, Stops genau am Stop-Kurs, Bewegung sofort.${scen?.laedt ? ' Kursgeschichte wird gerade ergänzt.' : ''}`;
   };
   sl.addEventListener('input', upd);
   sl.addEventListener('pointerdown', () => { scrubbing = true; });

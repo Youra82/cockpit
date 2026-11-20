@@ -43,6 +43,7 @@ DB_PATH = os.path.join(DATA, 'cockpit.db')
 GOAL_PATH = os.path.join(DATA, 'goal.json')
 BOTS_PATH = os.path.join(DATA, 'bots.json')
 SEEN_PATH = os.path.join(DATA, 'seen.json')
+SCEN_PATH = os.path.join(DATA, 'szenario_kurse.json')   # Tageskerzen fuer die historischen Worst-Case-Szenarien
 PRODUCT = 'USDT-FUTURES'
 # Alarme, die bei ausgeblendeten Bots trotzdem gemeldet werden (falls in der App eingeschaltet)
 CRIT_HIDDEN = {'Position ohne Stop-Loss', 'Liquidation vor Stop-Loss', 'Nahe an der Liquidation', 'Liquidation'}
@@ -1505,6 +1506,14 @@ class App:
         self.zones_cache, self.zones_busy = {'ts': 0, 'coins': []}, threading.Lock()
         self.baro_cache, self.baro_lock = {'ts': 0, 'data': None}, threading.Lock()
         self.fng_cache = {'ok': 0, 'try': 0, 'data': None}
+        self.scen_busy, self.scen_built = threading.Lock(), (None, None)
+        self.scen_cache = {'ts': 0, 'kurse': {}}
+        try:   # Kursgeschichte vom letzten Lauf: nur noch fehlende Tage nachladen
+            with open(SCEN_PATH, encoding='utf-8') as f:
+                v = json.load(f)
+            self.scen_cache = {'ts': float(v.get('ts', 0)), 'kurse': v.get('kurse') or {}}
+        except (OSError, ValueError, AttributeError):
+            pass
         sk = os.path.join(DATA, 'siri_key')
         if not os.path.isfile(sk):
             with open(sk, 'w') as f:
@@ -1949,6 +1958,94 @@ class App:
                    "SUI APT ARB SEI TIA WLD PEPE SHIB WIF FET ORDI STX IMX RUNE GALA SAND MANA AXS CRV LDO "
                    "DYDX GMX EGLD HBAR VET ICP ENS COMP SNX CHZ BTC").split()
 
+    def scenario(self):
+        """Historische Szenarien fuer den Worst-Case-Regler: taegliche Bewegung (Schluss, Tief, Hoch gegen den
+        Vortagesschluss, in %) von BTC und jedem Coin mit offener Position seit 2020 (oeffentliche Bitget-Tageskerzen).
+        Die App sucht dazu Tage, an denen BTC aehnlich stark lief, und spielt die echten Coin-Bewegungen dieser Tage
+        auf die offenen Positionen. Dazu Beta getrennt fuer BTC faellt / steigt (2 Jahre) als Ersatz fuer Coins, die
+        an einem Tag noch nicht gehandelt wurden. Laedt im Hintergrund, alle 6 Stunden bzw. bei neuen Coins."""
+        syms = sorted({p['symbol'] for b in self.poller.snapshot()['bots'] for p in b['positions']})
+        need = ['BTC/USDT:USDT'] + [s for s in syms if s != 'BTC/USDT:USDT']
+        c = self.scen_cache
+        if (time.time() - c['ts'] > 6 * 3600 or any(s not in c['kurse'] for s in need)) \
+                and self.scen_busy.acquire(blocking=False):
+            threading.Thread(target=self._scen_refresh, args=(need,), daemon=True).start()
+        key = (c['ts'], tuple(need), len(c['kurse']))
+        if self.scen_built[0] != key:
+            self.scen_built = (key, self._scen_build(need))
+        return {**self.scen_built[1], 'laedt': self.scen_busy.locked()}
+
+    def _scen_build(self, need):
+        k = self.scen_cache['kurse']
+        day = 86400 * 1000
+
+        def moves(sym):   # Tag -> (Schluss %, Tief %, Hoch %) gegen den Vortagesschluss
+            rows = sorted((int(r[0]), r[1], r[2], r[3]) for r in k.get(sym) or [])
+            out = {}
+            for (t0, _, _, c0), (t, h, lo, c) in zip(rows, rows[1:]):
+                if t - t0 == day and c0:
+                    out[t] = ((c / c0 - 1) * 100, (lo / c0 - 1) * 100, (h / c0 - 1) * 100)
+            return out
+
+        def slope(pairs):
+            if len(pairs) < 20:
+                return None
+            mx = sum(x for x, _ in pairs) / len(pairs)
+            my = sum(y for _, y in pairs) / len(pairs)
+            var = sum((x - mx) ** 2 for x, _ in pairs)
+            return round(sum((x - mx) * (y - my) for x, y in pairs) / var, 2) if var else None
+
+        rb = moves('BTC/USDT:USDT')
+        grid = sorted(rb)
+        coins, beta = {}, {}
+        for s in need:
+            rc = moves(s)
+            if not rc:
+                continue
+            coins[s] = {f: [round(rc[t][i], 2) if t in rc else None for t in grid] for i, f in enumerate('clh')}
+            pairs = [(rb[t][0], rc[t][0]) for t in grid[-730:] if t in rc]
+            beta[s] = {'down': slope([p for p in pairs if p[0] < 0]), 'up': slope([p for p in pairs if p[0] > 0]),
+                       'seit': min(rc)}
+        return {'t': grid, 'btc': [round(rb[t][0], 2) for t in grid], 'coins': coins, 'beta': beta,
+                'fehlt': [s for s in need if s not in coins]}
+
+    def _scen_refresh(self, need):
+        """Fehlende Tageskerzen nachladen (Bitget: hoechstens 90 je Abruf, vor dem Listing leer -> weiterspringen).
+        Nur abgeschlossene Tage. Ruhig: kurze Pause je Abruf."""
+        try:
+            ex = self.public_client()
+            k = dict(self.scen_cache['kurse'])
+            day, start = 86400 * 1000, int(datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+            for sym in need:
+                now_ms = int(time.time() * 1000)
+                rows = {int(r[0]): r for r in k.get(sym) or []}
+                since = max(rows) + day if rows else start
+                try:
+                    while since + day <= now_ms:
+                        part = ex.fetch_ohlcv(sym, '1d', since, 90)
+                        if part:
+                            rows.update({int(r[0]): [int(r[0]), r[2], r[3], r[4]] for r in part if int(r[0]) + day <= now_ms})
+                            since = max(int(part[-1][0]) + day, since + day)
+                        else:
+                            since += 90 * day
+                        time.sleep(0.2)
+                except Exception as e:
+                    log.warning('Szenario-Kurse %s: %s', sym, str(e)[:120])
+                k[sym] = [rows[t] for t in sorted(rows)]
+                self.scen_cache = {'ts': self.scen_cache['ts'], 'kurse': dict(k)}   # Fortschritt sofort nutzbar
+            if len(k) > 80:   # alte Coins ohne Position nicht ewig mitschleppen
+                k = {s: v for s, v in k.items() if s in need or len(k) <= 80}
+            self.scen_cache = {'ts': time.time(), 'kurse': k}
+            tmp = SCEN_PATH + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump({'ts': self.scen_cache['ts'], 'kurse': k}, f, separators=(',', ':'))
+            os.replace(tmp, SCEN_PATH)
+            log.info('Szenario-Kurse: %d Coins aktuell', len(k))
+        except Exception:
+            log.exception('Szenario-Kurse abgebrochen')
+        finally:
+            self.scen_busy.release()
+
     def zones(self):
         """Treppe/Aufzug-Zonen der evobot-Coins (oeffentliche Bitget-1h-Kerzen, alle 30 min im Hintergrund neu)."""
         c = self.zones_cache
@@ -2193,6 +2290,8 @@ def make_handler(app):
                     return self.send_json({'error': f'{type(e).__name__}: {str(e)[:120]}'}, 502)
             if url.path == '/api/reports':
                 return self.send_json(app.reports())
+            if url.path == '/api/scenario':
+                return self.send_json(app.scenario())
             if url.path == '/api/barometer':
                 return self.send_json(app.barometer())
             if url.path == '/api/report':
