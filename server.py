@@ -1074,6 +1074,7 @@ class Poller(threading.Thread):
         self.markets_client = None
         self.pusher = None
         self.seen_alerts, self.reported_alerts = set(), None
+        self.polls = 0      # abgeschlossene Abfragerunden; 0 = gerade gestartet, Kontostaende/Papierkonten noch leer
 
     def is_hidden(self, name):
         """Ausgeblendet: in der App abgeschaltet oder neu gefunden und noch nie bestätigt."""
@@ -1297,6 +1298,7 @@ class Poller(threading.Thread):
             self.git = {b['name']: git_info(b['path']) for b in self.bots}
             self.git_ts = time.time()
         self.build_state()
+        self.polls += 1
 
     def build_state(self, pushes=True):
         with self.build_lock:
@@ -1785,6 +1787,9 @@ class App:
             now = time.time()
             if self.baro_cache['data'] is not None and now - self.baro_cache['ts'] < 300:
                 return self.baro_cache['data']
+            # Direkt nach dem Start ist noch keine Abfrage durch: ohne Kontostand waere jedes Gewicht 0, ohne
+            # Papierkonto stuende jeder Papier-Bot auf "steht" -> rechnen, aber nicht merken und als vorlaeufig kennzeichnen
+            ready = self.poller.polls > 0
             st = self.poller.snapshot()
             items = {x['name']: x for x in st.get('bots', [])}
             reports = {r['bot']: r for r in self.reports()}
@@ -1844,7 +1849,9 @@ class App:
             # Auf diesem Rechner installiert, aber im Cockpit nicht eingeschaltet -> nicht bewertet (nur Hinweis)
             out['inactive'] = [{'name': d['name'], 'new': d['new'], 'running': d['running'], 'paper': d['paper']}
                                for d in st.get('detected', []) if not d['shown']]
-            self.baro_cache = {'ts': now, 'data': out}
+            out['vorlaeufig'] = not ready
+            if ready:
+                self.baro_cache = {'ts': now, 'data': out}
             return out
 
     def report_html(self, bot):

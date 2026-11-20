@@ -1229,8 +1229,9 @@ function drawBaroCard(box, d) {
   const e = d.echt, p = d.papier;
   if (!e && !p) { box.innerHTML = ''; return; }
   const main = e || p, tr = baroTrend(main.score, main.prev);
+  if (d.vorlaeufig) delete apiCache['/api/barometer'];   // Server startet gerade: beim naechsten Aufruf neu holen
   box.innerHTML = `<a class="card barocard" href="#/barometer" aria-label="Botbarometer öffnen">
-    <div class="row2"><b>Botbarometer</b><span class="muted">${d.bots.length} Bots bewertet ›</span></div>
+    <div class="row2"><b>Botbarometer</b><span class="muted">${d.vorlaeufig ? 'Server startet, vorläufig ›' : `${d.bots.length} Bots bewertet ›`}</span></div>
     <div class="barorow">${gaugeSvg(main.score, main.prev, `Botbarometer ${main.label}`, d.markt)}
       <div class="barot"><span class="lbl">${d.markt ? '<i class="lg" style="background:var(--text)"></i>' : ''}${e ? 'Bots Echtgeld' : 'Bots Papier'}</span><b style="color:var(${baroVar(main.score)})">${esc(main.label)}</b>
         <span class="mono">${nf(main.score, 0)} / 100</span><span class="${tr.c}">${tr.a} ${tr.t} <small class="muted">(vor 7 T ${nf(main.prev, 0)})</small></span>
@@ -1259,8 +1260,10 @@ function drawBarometer(box, d) {
     <div class="card tight">${list.map(baroRow).join('')}</div>`;
   };
   const echt = d.bots.filter((b) => !b.paper), paper = d.bots.filter((b) => b.paper);
+  if (d.vorlaeufig) delete apiCache['/api/barometer'];
   const inact = (d.inactive || []).filter((x) => x.running), unr = d.unrated || [];
-  box.innerHTML = (d.bots.length ? '' : '<div class="card"><div class="empty">Keine eingeschalteten Bots mit Daten.</div></div>')
+  box.innerHTML = (d.vorlaeufig ? '<div class="hint"><span class="grow">Der Server ist gerade gestartet und hat die Konten noch nicht abgefragt. Werte sind vorläufig, in etwa einer Minute neu laden.</span></div>' : '')
+    + (d.bots.length ? '' : '<div class="card"><div class="empty">Keine eingeschalteten Bots mit Daten.</div></div>')
     + sec('Echtgeld', 'Gewicht = Kapital × Vertrauen', d.echt, echt)
     + sec('Papier', 'Gewicht = Vertrauen · zählt nicht zum Echtgeld', d.papier, paper)
     + (unr.length ? `<div class="hint"><span class="grow">Eingeschaltet, aber ohne Kontodaten (kein API-Schlüssel oder noch kein Papierkonto): ${unr.map(esc).join(', ')}</span></div>` : '')
