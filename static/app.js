@@ -592,6 +592,7 @@ function viewHome() {
     <div class="tile"><span class="lbl">Trades heute</span><b>${t.trades}</b></div>
   </div>
   <div id="barobox"></div>
+  <div id="flowbox"></div>
   <div class="h2row"><div><b>Meine Bots</b><span class="lbl">heute realisiert + offen</span></div>${sortSeg()}</div>
   ${bots.map(botRow).join('')}
   ${nh ? `<a class="hint" href="#/system"><span class="grow">${nh} weitere${nh > 1 ? '' : 'r'} Bot${nh > 1 ? 's' : ''} erkannt, ausgeblendet</span><b>System ›</b></a>` : ''}
@@ -816,6 +817,19 @@ function viewAlerts() {
   <div class="lbl" style="text-align:center">Geprüft: Bot läuft, Stop-Loss vorhanden, Abstand zur Liquidation, gleiche Coins in mehreren Bots, Orders ohne Position, Bitget erreichbar. Mitteilungen einstellen: unter System.</div>`;
 }
 
+function viewFlow() {
+  return `${header('Geldfluss', 'Kapital rein / raus · nur Lagebild', true)}
+  <div id="flowpage" style="display:flex;flex-direction:column;gap:14px"><div class="card">${SKEL}</div></div>`;
+}
+// Geldfluss laedt im Hintergrund (erster Abruf, alle 5 min neu): solange alle 15 s nachsehen
+function loadFlow(id, draw) {
+  cachedApi('/api/flow', 120000).then((d) => {
+    const el = document.getElementById(id); if (!el) return;
+    draw(el, d);
+    if (d.laedt || !d.ts) { delete apiCache['/api/flow']; setTimeout(() => { if (document.getElementById(id)) loadFlow(id, draw); }, 15000); }
+  }).catch(() => {});
+}
+
 function viewBaro() {
   return `${header('Botbarometer', 'alle im Cockpit eingeschalteten Bots', true)}
   <div id="baro" style="display:flex;flex-direction:column;gap:14px"><div class="card">${SKEL}</div></div>`;
@@ -976,7 +990,9 @@ function groupBody(g, d) {
   <h2>Letzte Trades <small>${d.stats.totals.count || 0} in 90 Tagen · antippen für Chart</small></h2>
   <div class="card tight">${tradeRows(d.stats.trades, true)}</div>`;
   const zc = (d.zones && d.zones.coins) || [], za = (art) => zc.filter((c) => c.art === art).length;
-  return `<a class="card zlink" href="#/zonen"><div class="row2"><b>Zonen: Treppe &amp; Aufzug</b><span class="muted">öffnen ›</span></div>
+  return `<a class="card zlink" href="#/geldfluss"><div class="row2"><b>Geldfluss</b><span class="muted">öffnen ›</span></div>
+    <span class="lbl">ETF-Zu- und Abflüsse, Liquidationen Long/Short, Futures-Geld – nur Lagebild</span></a>
+  <a class="card zlink" href="#/zonen"><div class="row2"><b>Zonen: Treppe &amp; Aufzug</b><span class="muted">öffnen ›</span></div>
     <span class="lbl">${zc.length ? `${zc.length} Coins · Aufzug ${za('Aufzug')} · Treppe ${za('Treppe')} · Rückprall ${za('Rückprall')} · Stand ${ago(d.zones.ts)}`
       : 'wird berechnet …'}</span></a>
   ${viz('vizQ', 'Marktphase jetzt', 'BTC Tageschart', 'In welcher Phase ist der Markt, und wie schneiden deine Bots in genau dieser Phase ab?')}
@@ -1238,7 +1254,7 @@ async function render() {
   if (!state) return;
   const r = route();
   tabs.hidden = false;
-  const tab = { bot: 'home', trade: 'home', kpi: 'home', barometer: 'home', zonen: 'auswertung' }[r.name] || r.name;
+  const tab = { bot: 'home', trade: 'home', kpi: 'home', barometer: 'home', geldfluss: 'home', zonen: 'auswertung' }[r.name] || r.name;
   for (const a of tabs.querySelectorAll('a')) a.classList.toggle('on', a.dataset.tab === tab);
   const badge = document.getElementById('badge');
   const crit = groupAlerts(liveAlerts().filter((a) => a.level !== 'info')).length;
@@ -1247,7 +1263,7 @@ async function render() {
   const html = r.name === 'bot' ? viewBot(r.arg) : r.name === 'trade' ? viewTrade(r.arg) : r.name === 'alarme' ? viewAlerts()
     : r.name === 'auswertung' ? viewStats() : r.name === 'system' ? viewSystem() : r.name === 'zonen' ? viewZones()
       : r.name === 'positionen' ? viewPositions() : r.name === 'kpi' ? viewKpi(r.arg, r.arg2)
-        : r.name === 'barometer' ? viewBaro() : viewHome();
+        : r.name === 'barometer' ? viewBaro() : r.name === 'geldfluss' ? viewFlow() : viewHome();
   app.innerHTML = html;
   updateMinibar();
   flashChanges();
@@ -1290,6 +1306,7 @@ async function render() {
         app.querySelectorAll('[data-act]').forEach((s) => { s.innerHTML = actPill(a, s.dataset.act); });
       }).catch(() => {});
       cachedApi('/api/barometer', 120000).then((d) => { const bx = document.getElementById('barobox'); if (bx) drawBaroCard(bx, d); }).catch(() => {});
+      loadFlow('flowbox', drawFlowCard);
       const sbx = document.getElementById('sincebox');
       if (sbx) cachedApi(`/api/since?ts=${sinceTs}`, 60000).then((d) => { if (sbx.isConnected) drawSince(sbx, d); }).catch(() => sbx.remove());
       // Kurve + Markierungen (Trades, Ein-/Auszahlungen, heute inkl. offen) und Mini-Kurven je Bot
@@ -1299,6 +1316,8 @@ async function render() {
       const ex = { trades, transfers, open };
       const el = document.getElementById('homechart'); if (el) { el.innerHTML = chartWithSummary(pts, ex); bindScrub(el, pts, ex); }
       (race?.bots || []).forEach((s) => { const sp = app.querySelector(`[data-spark="${CSS.escape(s.name)}"]`); if (sp) sp.innerHTML = sparkSvg(s.v); });
+    } else if (r.name === 'geldfluss') {
+      loadFlow('flowpage', drawFlowPage);
     } else if (r.name === 'barometer') {
       const d = await cachedApi('/api/barometer', 120000);
       const el = document.getElementById('baro'); if (el) drawBarometer(el, d);

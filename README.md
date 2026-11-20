@@ -53,6 +53,15 @@ Die API-Schlüssel kommen aus der `secret.json` des jeweiligen Bots. Nutzen zwei
 
 `format`: `std` (papier.py), `evo`, `listing` oder `kbot`. Auch so erkannte Bots starten ausgeblendet und werden erst gezählt, wenn du sie unter System einschaltest.
 
+## Geldfluss
+
+Übersicht → Karte **Geldfluss** unter dem Botbarometer (ganze Seite `#/geldfluss`, auch über Auswertung → Markt). Nur Lagebild, kein Signal (ETF-Zuflüsse am 23.10. geprüft: sagen den BTC-Kurs des Folgetags nicht voraus).
+
+- **US-Spot-BTC-ETFs:** Zu- und Abflüsse je Tag (30 Tage), Summe 7/30 Tage, Bestand. Quelle tftc.io (SoSoValue/Farside), stündlich nachgesehen.
+- **Zwangsliquidationen Long/Short:** 24 Stunden, alle Coins, aus den Tagesdateien des evobot-Rekorders (`evobot/data/rec/liq`, Binance). Läuft der Rekorder nicht (status.json älter als 15 min), ersatzweise OKX BTC/ETH/SOL der letzten Stunde.
+- **Futures-Geld:** Open Interest BTC (Binance) 24 h gegen den BTC-Kurs, Anteil der Long-Konten.
+- **Lage-Zeile:** rot „Abfluss“ bzw. grün „Zufluss“, wenn ETF (7 Tage), Liquidationen und Futures-Geld in dieselbe Richtung zeigen, sonst „Gemischt“. Alles öffentlich, die Bots werden nicht abgefragt; neu alle 5 Minuten (`/api/flow`).
+
 ## Botbarometer
 
 Übersicht → Karte **Botbarometer** (ganze Seite unter `#/barometer`, auch über Auswertung → Bots). Bewertet wird jeder im Cockpit **eingeschaltete** Bot, Echtgeld wie Papier, mit 0–100 Punkten auf der Skala Sturm · Regen · Veränderlich · Schön · Sehr schön. Es gibt keine feste Bot-Liste: Ein neuer Bot wird mitbewertet, sobald er eingeschaltet ist.

@@ -567,3 +567,14 @@ a.kpi:active { transform: scale(.97); background: var(--soft); }
 @media (max-width: 360px) { .barorow .gauge { width: 128px; } .barorow.big .gauge { width: 150px; } }
 .netl { display: flex; flex-direction: column; gap: 4px; }
 .netl .lsbar { height: 6px; margin: 0; }
+
+/* Geldfluss */
+.flow { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 6px 10px; align-items: center; font-size: 13px; }
+.flow .k { color: var(--muted); font-size: 12px; }
+.flow .fbig { font-family: var(--mono); font-size: 15px; }
+.fsplit { display: flex; height: 7px; border-radius: 4px; overflow: hidden; gap: 2px; margin-top: 4px; }
+.fsplit i { display: block; }
+.flage { display: flex; gap: 10px; align-items: center; padding: 9px 12px; border-radius: 12px; font-size: 13px; font-weight: 600; background: var(--warn-bg); color: var(--warn); }
+.flage.down { background: var(--down-bg); color: var(--down); }
+.flage.up { background: var(--up-bg); color: var(--up); }
+.flage .ar { font-size: 19px; line-height: 1; }

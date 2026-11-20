@@ -1507,6 +1507,7 @@ class App:
         self.baro_cache, self.baro_lock = {'ts': 0, 'data': None}, threading.Lock()
         self.fng_cache = {'ok': 0, 'try': 0, 'data': None}
         self.scen_busy, self.scen_built = threading.Lock(), (None, None)
+        self.flow_busy, self.flow_cache = threading.Lock(), {'ts': 0, 'etf_ts': 0, 'data': None}
         self.scen_cache = {'ts': 0, 'kurse': {}}
         try:   # Kursgeschichte vom letzten Lauf: nur noch fehlende Tage nachladen
             with open(SCEN_PATH, encoding='utf-8') as f:
@@ -1958,6 +1959,135 @@ class App:
                    "SUI APT ARB SEI TIA WLD PEPE SHIB WIF FET ORDI STX IMX RUNE GALA SAND MANA AXS CRV LDO "
                    "DYDX GMX EGLD HBAR VET ICP ENS COMP SNX CHZ BTC").split()
 
+    def flow(self):
+        """Geldfluss (nur oeffentliche Daten, nur Lagebild): US-Spot-BTC-ETF-Fluesse (tftc.io, taeglich),
+        Zwangsliquidationen Long/Short (evobot-Rekorder = alle Binance-Liquidationen, sonst OKX letzte Stunde),
+        Binance-Futures-Geld (Open Interest BTC) und Long-Anteil der Konten. Laedt im Hintergrund, alle 5 min neu."""
+        c = self.flow_cache
+        if time.time() - c['ts'] > 300 and self.flow_busy.acquire(blocking=False):
+            threading.Thread(target=self._flow_refresh, daemon=True).start()
+        return {**(c['data'] or {}), 'ts': c['ts'], 'laedt': self.flow_busy.locked()}
+
+    def _flow_get(self, url, timeout=20):
+        req = urllib.request.Request(url, headers={'User-Agent': 'cockpit'})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.load(r)
+
+    def _liq_recorder(self, now):
+        """Liquidationen der letzten 24 h aus den Tagesdateien des evobot-Rekorders (Binance !forceOrder@arr).
+        SELL = Long zwangsgeschlossen, BUY = Short. None, wenn kein laufender Rekorder gefunden wird."""
+        base = os.path.abspath(os.path.join(BASE, self.cfg['bots_dir'], 'evobot', 'data', 'rec'))
+        try:
+            if now - os.path.getmtime(os.path.join(base, 'status.json')) > 900:   # Rekorder steht -> nicht nehmen
+                return None
+        except OSError:
+            return None
+        since_ms = int((now - 86400) * 1000)
+        long_, short, coins, n = 0.0, 0.0, {}, 0
+        bins = [[0.0, 0.0] for _ in range(24)]
+        for day in sorted({datetime.fromtimestamp(t, timezone.utc).strftime('%Y-%m-%d') for t in (now - 86400, now)}):
+            path = os.path.join(base, 'liq', day + '.csv.gz')
+            try:
+                with gzip.open(path, 'rt', encoding='utf-8') as f:
+                    for line in f:
+                        p = line.rstrip('\n').split(',')
+                        if len(p) < 9 or not p[0].isdigit():
+                            continue
+                        t = int(p[0])
+                        if t < since_ms:
+                            continue
+                        try:
+                            usd = (float(p[5]) * float(p[8])) if p[8] not in ('', 'None', '0') else float(p[4]) * float(p[3])
+                        except ValueError:
+                            continue
+                        k = 0 if p[2] == 'SELL' else 1
+                        if k == 0:
+                            long_ += usd
+                        else:
+                            short += usd
+                        coin = p[1][:-4] if p[1].endswith('USDT') else p[1]
+                        cc = coins.setdefault(coin, [0.0, 0.0])
+                        cc[k] += usd
+                        bins[min(23, int((t - since_ms) // 3_600_000))][k] += usd
+                        n += 1
+            except FileNotFoundError:
+                continue
+            except (OSError, EOFError):   # letzte Zeile wird gerade geschrieben -> bis dahin gelesen
+                continue
+        top = sorted(coins.items(), key=lambda kv: -(kv[1][0] + kv[1][1]))[:5]
+        return {'quelle': 'Binance (evobot-Rekorder)', 'stunden': 24, 'long': long_, 'short': short, 'n': n,
+                'bins': bins, 'coins': [{'c': k, 'long': v[0], 'short': v[1]} for k, v in top]}
+
+    def _liq_okx(self, now):
+        """Ersatz ohne Rekorder: OKX-Liquidationen BTC/ETH/SOL der letzten Stunde (oeffentlich, 100 je Abruf)."""
+        since_ms, coins, bins = int((now - 3600) * 1000), [], [[0.0, 0.0] for _ in range(12)]
+        long_ = short = 0.0
+        n = 0
+        for u in ('BTC-USDT', 'ETH-USDT', 'SOL-USDT'):
+            ct = float(self._flow_get(f'https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId={u}-SWAP')['data'][0]['ctVal'])
+            rows, after = [], None
+            for _ in range(40):
+                url = f'https://www.okx.com/api/v5/public/liquidation-orders?instType=SWAP&uly={u}&state=filled&limit=100'
+                det = [y for x in self._flow_get(url + (f'&after={after}' if after else ''))['data'] for y in x['details']]
+                if not det:
+                    break
+                rows += det
+                oldest = min(int(y['ts']) for y in det)
+                if oldest < since_ms or oldest == after:
+                    break
+                after = oldest
+                time.sleep(0.15)
+            cl = cs = 0.0
+            for y in rows:
+                t = int(y['ts'])
+                if t < since_ms:
+                    continue
+                usd = float(y['sz']) * ct * float(y['bkPx'])
+                k = 0 if y['posSide'] == 'long' else 1
+                bins[min(11, (t - since_ms) // 300_000)][k] += usd
+                if k == 0:
+                    cl += usd
+                else:
+                    cs += usd
+                n += 1
+            long_, short = long_ + cl, short + cs
+            coins.append({'c': u.split('-')[0], 'long': cl, 'short': cs})
+        return {'quelle': 'OKX (BTC, ETH, SOL)', 'stunden': 1, 'long': long_, 'short': short, 'n': n,
+                'bins': bins, 'coins': coins}
+
+    def _flow_refresh(self):
+        try:
+            now = time.time()
+            d = dict(self.flow_cache['data'] or {})
+            etf_ts = self.flow_cache.get('etf_ts', 0)
+            if now - etf_ts > 3600:
+                try:
+                    e = self._flow_get('https://www.tftc.io/bitcoin-etf-flows/data.json', 30)
+                    days = e.get('days') or []
+                    d['etf'] = [{'d': x['date'], 'v': x.get('netFlowUsd')} for x in days[-30:]]
+                    d['etf_assets'] = days[-1].get('totalNetAssetsUsd') if days else None
+                    etf_ts = now
+                except Exception as ex:
+                    log.warning('ETF-Fluesse nicht abrufbar: %s', str(ex)[:120])
+            try:
+                api = 'https://fapi.binance.com'
+                d['oi'] = [float(x['sumOpenInterestValue']) for x in
+                           self._flow_get(f'{api}/futures/data/openInterestHist?symbol=BTCUSDT&period=1h&limit=25')]
+                d['ls'] = [float(x['longAccount']) for x in
+                           self._flow_get(f'{api}/futures/data/globalLongShortAccountRatio?symbol=BTCUSDT&period=1h&limit=25')]
+                d['btc'] = [float(x[4]) for x in self._flow_get(f'{api}/fapi/v1/klines?symbol=BTCUSDT&interval=1h&limit=25')]
+            except Exception as ex:
+                log.warning('Futures-Daten nicht abrufbar: %s', str(ex)[:120])
+            try:
+                d['liq'] = self._liq_recorder(now) or self._liq_okx(now)
+            except Exception as ex:
+                log.warning('Liquidationen nicht abrufbar: %s', str(ex)[:120])
+            self.flow_cache = {'ts': now, 'etf_ts': etf_ts, 'data': d}
+        except Exception:
+            log.exception('Geldfluss abgebrochen')
+        finally:
+            self.flow_busy.release()
+
     def scenario(self):
         """Historische Szenarien fuer den Worst-Case-Regler: taegliche Bewegung (Schluss, Tief, Hoch gegen den
         Vortagesschluss, in %) von BTC und jedem Coin mit offener Position seit 2020 (oeffentliche Bitget-Tageskerzen).
@@ -2290,6 +2420,8 @@ def make_handler(app):
                     return self.send_json({'error': f'{type(e).__name__}: {str(e)[:120]}'}, 502)
             if url.path == '/api/reports':
                 return self.send_json(app.reports())
+            if url.path == '/api/flow':
+                return self.send_json(app.flow())
             if url.path == '/api/scenario':
                 return self.send_json(app.scenario())
             if url.path == '/api/barometer':

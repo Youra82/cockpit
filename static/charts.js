@@ -1341,3 +1341,93 @@ function baroRow(b) {
       <div>Vor 7 Tagen ${nf(b.prev, 0)} → jetzt ${nf(b.score, 0)} (<span class="${tr.c}">${signed(tr.d, 0)}</span>)${b.shared_with.length ? ` · teilt das Konto mit ${b.shared_with.map(esc).join(', ')}` : ''}</div>
       <a href="#/bot/${encodeURIComponent(b.name)}">Bot öffnen ›</a></div>` : ''}</div>`;
 }
+
+// ------------------------------------------------------------------ Geldfluss (Server: /api/flow) -- nur Lagebild
+// ETF-Fluesse (Kapitalmarkt), Zwangsliquidationen Long/Short, Futures-Geld (Open Interest BTC). Am 23.10. als Signal
+// geprueft (ETF -> BTC Folgetag: nichts), daher nur zur Einordnung.
+const usd = (v, sign = true) => {
+  const a = Math.abs(v || 0), s = !sign ? '' : v < 0 ? '−' : '+';
+  return (s + (a >= 1e9 ? `${nf(a / 1e9, 2)} Mrd. $` : `${nf(a / 1e6, a >= 1e8 ? 0 : 1)} Mio. $`)).replace(/ /g, '\u00a0');   // Betrag nie umbrechen
+};
+function flowStats(d) {
+  const etf = d.etf || [], last = etf[etf.length - 1];
+  const e7 = etf.slice(-7).reduce((s, x) => s + (x.v || 0), 0);
+  let streak = 0;
+  if (last) for (let i = etf.length - 1; i >= 0 && Math.sign(etf[i].v || 0) === Math.sign(last.v || 0); i--) streak++;
+  const L = d.liq?.long || 0, S = d.liq?.short || 0;
+  const oi = d.oi || [], oiP = oi.length > 1 ? (oi[oi.length - 1] / oi[0] - 1) * 100 : null;
+  const ls = d.ls || [], btc = d.btc || [];
+  // Lage: zeigen ETF (7 T), Liquidationen und Futures-Geld in dieselbe Richtung?
+  const sc = (last ? Math.sign(e7) : 0) + (L + S ? Math.sign(S - L) : 0) + (oiP == null ? 0 : Math.sign(oiP));
+  const lage = sc <= -2 ? { c: 'down', a: '↘', t: 'Abfluss: Kapital verlässt den Markt, Longs werden ausgespült' }
+    : sc >= 2 ? { c: 'up', a: '↗', t: 'Zufluss: Kapital kommt rein, Shorts werden ausgespült' }
+      : { c: 'warn', a: '→', t: 'Gemischt: kein klarer Geldfluss' };
+  return { etf, last, e7, streak, L, S, oi, oiP, ls, btc, lage };
+}
+const flowSplit = (L, S) => (L + S ? `<div class="fsplit" aria-hidden="true"><i style="flex:${L || 0.0001};background:var(--down)"></i><i style="flex:${S || 0.0001};background:var(--up)"></i></div>` : '');
+function flowLage(f) {
+  return `<div class="flage ${f.lage.c}"><span class="ar">${f.lage.a}</span>${esc(f.lage.t)}</div>`;
+}
+// Kompakte Karte fuer die Uebersicht
+function drawFlowCard(box, d) {
+  if (!d || (!d.etf && !d.liq && !d.oi)) { box.innerHTML = d?.laedt ? `<div class="card">${SKEL}</div>` : ''; return; }
+  const f = flowStats(d), b0 = f.btc[0], b1 = f.btc[f.btc.length - 1], ls0 = f.ls[0] * 100, ls1 = f.ls[f.ls.length - 1] * 100;
+  const h = d.liq?.stunden || 24;
+  box.innerHTML = `<a class="card barocard" href="#/geldfluss" aria-label="Geldfluss öffnen">
+    <div class="row2"><b>Geldfluss</b><span class="muted">${b1 ? `BTC ${nf(b1, 0)} $ <span class="${cls(b1 - b0)}">(${signed((b1 / b0 - 1) * 100, 1)} %)</span>` : ''} ›</span></div>
+    ${flowLage(f)}
+    <div class="flow">
+      ${f.last ? `<span class="k">ETF ${f.last.d.slice(8, 10)}.${f.last.d.slice(5, 7)}.</span><span><b class="fbig ${cls(f.last.v)}">${usd(f.last.v)}</b>
+        <span class="muted">· 7 T ${usd(f.e7)} · ${f.streak} Tag${f.streak > 1 ? 'e' : ''} ${f.last.v < 0 ? 'Abfluss' : 'Zufluss'} in Folge</span></span>` : ''}
+      ${d.liq ? `<span class="k">Liquidiert ${h} h</span><span>Longs <b class="down">${usd(f.L, false)}</b> ↔ Shorts <b class="up">${usd(f.S, false)}</b>${flowSplit(f.L, f.S)}</span>` : ''}
+      ${f.oiP != null ? `<span class="k">Futures 24 h</span><span>Geld <b class="${cls(f.oiP)}">${signed(f.oiP, 1)} %</b> <span class="muted">(${usd(f.oi[f.oi.length - 1] - f.oi[0])})</span>
+        ${f.ls.length ? ` · Konten long <b>${nf(ls1, 0)} %</b> <span class="muted">(${signed(ls1 - ls0, 0)} Pp)</span>` : ''}</span>` : ''}
+    </div>
+    <span class="lbl">Nur Lagebild – als Kaufsignal geprüft: kein Vorteil.</span></a>`;
+}
+// Ganze Seite: ETF-Balken 30 Tage, Liquidationen im Zeitverlauf, Futures-Geld gegen BTC-Kurs
+function drawFlowPage(box, d) {
+  if (!d || (!d.etf && !d.liq && !d.oi)) { box.innerHTML = d?.laedt ? `<div class="card">${SKEL}<span class="lbl">Daten werden geholt …</span></div>` : '<div class="card"><div class="empty">Keine Daten erreichbar.</div></div>'; return; }
+  const f = flowStats(d), parts = [];
+  parts.push(flowLage(f));
+  if (f.etf.length) {
+    const mx = Math.max(...f.etf.map((x) => Math.abs(x.v || 0)), 1), n = f.etf.length, bw = 352 / n, H = 90, y0 = H / 2;
+    const bars = f.etf.map((x, i) => { const v = x.v || 0, hh = Math.abs(v) / mx * (y0 - 3);
+      return `<rect x="${(4 + i * bw + bw * 0.15).toFixed(1)}" width="${(bw * 0.7).toFixed(1)}" y="${(v >= 0 ? y0 - hh : y0).toFixed(1)}" height="${Math.max(1, hh).toFixed(1)}" rx="1.5" fill="var(${v >= 0 ? '--up' : '--down'})"><title>${x.d}: ${usd(v)}</title></rect>`; }).join('');
+    const d0 = f.etf[0].d, d1 = f.last.d, tot = f.etf.reduce((s, x) => s + (x.v || 0), 0);
+    parts.push(`<div class="card"><div class="row2"><b>US-Spot-BTC-ETFs</b><span class="muted">${d.etf_assets ? `Bestand ${usd(d.etf_assets, false)}` : ''}</span></div>
+      <svg class="viz" viewBox="0 0 360 ${H + 14}" role="img" aria-label="ETF-Flüsse 30 Tage">${bars}<line x1="4" x2="356" y1="${y0}" y2="${y0}" stroke="var(--line)"/>
+      <text x="4" y="${H + 12}">${d0.slice(8, 10)}.${d0.slice(5, 7)}.</text><text x="356" y="${H + 12}" text-anchor="end">${d1.slice(8, 10)}.${d1.slice(5, 7)}.</text></svg>
+      <span class="lbl">Letzter Tag <b class="${cls(f.last.v)}">${usd(f.last.v)}</b> · 7 Tage <b class="${cls(f.e7)}">${usd(f.e7)}</b> · 30 Tage <b class="${cls(tot)}">${usd(tot)}</b>.
+        Grün = Geld fließt in BTC-ETFs, rot = Geld wird abgezogen. Neu einmal täglich nach US-Börsenschluss (Quelle tftc.io / SoSoValue).</span></div>`);
+  }
+  if (d.liq) {
+    const q = d.liq, nb = q.bins.length, mx = Math.max(...q.bins.map((b) => Math.max(b[0], b[1])), 1), H = 90, y0 = H / 2, bw = 352 / nb;
+    const bars = q.bins.map((b, i) => { const hl = b[0] / mx * (y0 - 4), hs = b[1] / mx * (y0 - 4), x = (4 + i * bw + bw * 0.15).toFixed(1), w = (bw * 0.7).toFixed(1);
+      return `<rect x="${x}" width="${w}" y="${y0}" height="${Math.max(0.5, hl).toFixed(1)}" rx="1.5" fill="var(--down)"/><rect x="${x}" width="${w}" y="${(y0 - hs).toFixed(1)}" height="${Math.max(0.5, hs).toFixed(1)}" rx="1.5" fill="var(--up)"/>`; }).join('');
+    parts.push(`<div class="card"><div class="row2"><b>Zwangsliquidationen</b><span class="muted">letzte ${q.stunden} h · ${esc(q.quelle)}</span></div>
+      <div class="row2"><span>Longs gekillt <b class="down mono">${usd(f.L, false)}</b></span><span>Shorts gekillt <b class="up mono">${usd(f.S, false)}</b></span></div>
+      ${flowSplit(f.L, f.S)}
+      <svg class="viz" viewBox="0 0 360 ${H + 14}" role="img" aria-label="Liquidationen im Zeitverlauf">${bars}<line x1="4" x2="356" y1="${y0}" y2="${y0}" stroke="var(--line)"/>
+        <text x="6" y="11">▲ Shorts gekillt</text><text x="6" y="${H - 2}">▼ Longs gekillt</text><text x="4" y="${H + 12}">vor ${q.stunden} h</text><text x="356" y="${H + 12}" text-anchor="end">jetzt</text></svg>
+      <span class="lbl">${(q.coins || []).map((c) => `${esc(c.c)}: Longs ${usd(c.long, false)} · Shorts ${usd(c.short, false)}`).join('<br>')}
+        ${q.stunden === 1 ? '<br>Der evobot-Rekorder läuft hier nicht – Ersatz: OKX, letzte Stunde.' : '<br>Binance sendet höchstens eine Liquidation je Coin und Sekunde – echte Summen sind eher höher.'}</span></div>`);
+  }
+  if (f.oi.length > 1) {
+    const H = 80, n = f.oi.length, lo = Math.min(...f.oi), hi = Math.max(...f.oi), blo = Math.min(...f.btc), bhi = Math.max(...f.btc);
+    const x = (i, m) => (4 + i / (m - 1) * 352).toFixed(1), y = (v, a, b) => (6 + (1 - (v - a) / (b - a || 1)) * (H - 12)).toFixed(1);
+    const ls0 = f.ls[0] * 100, ls1 = f.ls[f.ls.length - 1] * 100;
+    parts.push(`<div class="card"><div class="row2"><b>Futures-Geld (Open Interest BTC)</b><span class="muted">24 h · Binance</span></div>
+      <svg class="viz" viewBox="0 0 360 ${H + 14}" role="img" aria-label="Open Interest und BTC-Kurs">
+        ${f.btc.length > 1 ? `<path d="${f.btc.map((v, i) => `${i ? 'L' : 'M'}${x(i, f.btc.length)} ${y(v, blo, bhi)}`).join(' ')}" fill="none" stroke="var(--btc)" stroke-width="1.4" stroke-dasharray="3 2"/>` : ''}
+        <path d="${f.oi.map((v, i) => `${i ? 'L' : 'M'}${x(i, n)} ${y(v, lo, hi)}`).join(' ')}" fill="none" stroke="var(--accent)" stroke-width="1.8"/>
+        <text x="4" y="${H + 12}">vor 24 h</text><text x="356" y="${H + 12}" text-anchor="end">jetzt</text>
+        <text x="356" y="11" text-anchor="end" style="fill:var(--accent)">Futures-Geld</text><text x="356" y="23" text-anchor="end" style="fill:var(--btc)">BTC-Kurs</text></svg>
+      <span class="lbl">Offene Futures-Positionen <b class="${cls(f.oiP)}">${signed(f.oiP, 1)} %</b> (${usd(f.oi[0], false)} → ${usd(f.oi[n - 1], false)}):
+        ${f.oiP < 0 ? 'Geld verlässt den Futures-Markt (Positionen werden geschlossen oder liquidiert).' : 'neues Geld kommt in den Futures-Markt.'}
+        ${f.ls.length ? `Anteil der Konten long: ${nf(ls0, 0)} % → <b>${nf(ls1, 0)} %</b>${ls1 > ls0 + 1 && f.oiP < 0 ? ' – die Masse kauft den Rückgang.' : ''}` : ''}</span></div>`);
+  }
+  parts.push(`<div class="card"><div class="q" style="display:block">Nur Lagebild, kein Signal: ETF-Zuflüsse sagten den BTC-Kurs des Folgetags nicht voraus (geprüft 23.10.), Liquidationen und Futures-Geld ebenso nicht.
+    Die Lage-Zeile wird rot bzw. grün, wenn ETF (7 Tage), Liquidationen und Futures-Geld in dieselbe Richtung zeigen. Stand ${timeStr(d.ts * 1000)}, neu alle 5 Minuten.</div></div>`);
+  box.innerHTML = parts.join('');
+}
