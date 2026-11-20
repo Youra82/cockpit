@@ -159,6 +159,10 @@ SWITCH_BOTS = {
     # kbot: Wal-Einzahlung -> Short 60 min, zwei Papierkonten (Market = Hauptkonto, Limit = Vergleich)
     'kbot': {'paper': os.path.join('artifacts', 'state', 'paper_shorts.json'), 'format': 'kbot', 'cycle': 5,
              'default_live': False, 'ohne_sl': True, 'nur_papier': True},
+    # hybridbot R6: Entropie-Kern 12h/8h, Market + Positions-SL/TP; Papier ueber utils/papier.py (wie jaegerbot).
+    # Fehlt der Schalter, handelt der Bot auf Papier -> default_live False.
+    'hybridbot': {'paper': os.path.join('artifacts', 'papier', 'konto.json'), 'format': 'std', 'cycle': 15,
+                  'default_live': False, 'ohne_sl': False},
 }
 
 
